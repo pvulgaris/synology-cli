@@ -9,11 +9,11 @@
 
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY tsconfig.json ./
+COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
-RUN npm run build
+# `prepare` script (tsc) runs during install, so tsconfig.json + src must be
+# present before `npm ci`. Don't reorder these lines.
+RUN npm ci
 
 FROM node:20-alpine
 WORKDIR /app
@@ -33,7 +33,9 @@ RUN apk add --no-cache curl unzip ca-certificates \
  && apk del curl unzip
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# --ignore-scripts: skip `prepare: tsc` — tsc is a devDependency and we already
+# have dist/ from the build stage. Without this, prod-only install errors.
+RUN npm ci --omit=dev --ignore-scripts
 COPY --from=build /app/dist ./dist
 
 ENV NODE_ENV=production
