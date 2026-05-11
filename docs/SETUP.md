@@ -134,15 +134,31 @@ curl -i -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 From outside the tailnet, the same curl times out (no LAN binding).
 From a tailnet device not in the ACL allowlist, same curl times out at the ACL layer.
 
-## 8. Wire up Claude
+## 8. Wire up the local bridge (Claude Desktop only)
+
+Claude Desktop currently only accepts stdio MCP entries, not HTTP. Install the package's `bridge` subcommand globally on your Mac — it's a 39-line stdio→HTTP proxy that lives at `/opt/homebrew/bin/synology-nas-mcp`.
+
+```sh
+cd ~/Dropbox/Code/synology-nas-mcp
+npm install -g .
+```
+
+This builds + copies the package to `/opt/homebrew/lib/node_modules/synology-nas-mcp/` (a stable snapshot — edits to the repo don't propagate until you re-run `npm install -g .`).
+
+After meaningful code changes, re-run `npm install -g .` to update the global install.
+
+## 9. Wire up Claude
 
 `~/Library/Application Support/Claude/claude_desktop_config.json` — add under `mcpServers`:
 
 ```json
 "synology": {
-  "type": "http",
-  "url": "http://nas.local:8765/mcp",
-  "headers": { "Authorization": "Bearer <paste token>" }
+  "command": "/opt/homebrew/bin/synology-nas-mcp",
+  "args": ["bridge"],
+  "env": {
+    "MCP_BRIDGE_URL": "http://nas.local:8765/mcp",
+    "MCP_BRIDGE_TOKEN": "<paste bearer token here>"
+  }
 }
 ```
 
