@@ -17,16 +17,41 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 function resolveBindHost(cfg: Config): string {
   if (cfg.mcpBindHost) return cfg.mcpBindHost;
-  // Find tailscale0's IPv4 address, fall back to 127.0.0.1 if missing (dev).
   const ifaces = os.networkInterfaces();
-  const ts = ifaces["tailscale0"];
-  const v4 = ts?.find((i) => i.family === "IPv4");
-  if (v4) return v4.address;
+
+  // 1) Try named Tailscale interfaces.
+  for (const name of ["tailscale0", "tailscale1", "ts0"]) {
+    const v4 = ifaces[name]?.find((i) => i.family === "IPv4");
+    if (v4) {
+      console.error(`[http] binding ${name} (${v4.address})`);
+      return v4.address;
+    }
+  }
+
+  // 2) Synology's Tailscale package doesn't always expose the named interface
+  //    inside a host-networked container. Scan for any IPv4 in Tailscale's
+  //    CGNAT range (100.64.0.0/10) — that's the de-facto Tailscale signature.
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    for (const a of addrs ?? []) {
+      if (a.family !== "IPv4") continue;
+      const [o1, o2] = a.address.split(".").map((x) => parseInt(x, 10));
+      if (o1 === 100 && o2 >= 64 && o2 <= 127) {
+        console.error(
+          `[http] binding ${name} (${a.address}) — matches Tailscale CGNAT range`
+        );
+        return a.address;
+      }
+    }
+  }
+
+  // 3) No Tailscale interface found. Bind 0.0.0.0 and rely on the bearer
+  //    token + Tailscale ACL + (optionally) DSM firewall for safety.
   console.error(
-    "[http] tailscale0 not found; falling back to 127.0.0.1. " +
-      "Set MCP_BIND_HOST explicitly to bind to a specific interface."
+    "[http] no Tailscale interface detected; binding 0.0.0.0. Wire-level " +
+      "safety relies on the bearer token, Tailscale ACL, and DSM firewall. " +
+      "Set MCP_BIND_HOST explicitly to bind to a specific IP."
   );
-  return "127.0.0.1";
+  return "0.0.0.0";
 }
 
 export async function startHttpDaemon(
@@ -44,7 +69,7 @@ export async function startHttpDaemon(
   // Health endpoint — bypasses auth so you can curl it from a tailnet host
   // without rotating the bearer token. Returns no NAS state.
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, server: "synology-nas-mcp", version: "0.1.0" });
+    res.json({ ok: true, server: "synology-nas-mcp", version: "0.1.1" });
   });
 
   // Auth + Origin middleware applied to /mcp.

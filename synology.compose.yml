@@ -28,7 +28,7 @@ services:
   synology-nas-mcp:
     build:
       context: .
-    image: synology-nas-mcp:0.1.0
+    image: synology-nas-mcp:0.1.1
     container_name: synology-nas-mcp
     restart: unless-stopped
     network_mode: host
