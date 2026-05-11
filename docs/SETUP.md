@@ -21,15 +21,27 @@ DSM → Control Panel → User & Group → Create.
 | Password | strong random, captured into 1Password (next step) |
 | Disallow password change | yes |
 | Password never expires | yes |
-| Allow this user to access | Package Center, Security Advisor, Control Panel, Resource Monitor — no others |
-| Application permissions | Deny: File Station, all file services |
-| User group | `users` only (NOT `administrators`) |
-| 2-Factor Authentication | enable; capture the TOTP secret to 1Password |
+| Application permissions (wizard) | Allow: DSM only. Deny: File Station, AFP, FTP, SFTP, SMB, rsync, Audio Station, Universal Search |
+| Shared folder permissions | No Access on every share (override `homes` explicitly) |
+| User group | `users` **and** `administrators` (see "Why administrators" below) |
+| 2-Factor Authentication | enable; capture the TOTP **secret** (base32 string, not the 6-digit code) to 1Password |
 | Speed limit | leave default |
 
-DSM privileges are app-scoped, not action-scoped — there is no "Package Center read-only." Granting Package Center access enables install/uninstall. The MCP server constrains that further: it hard-refuses DSM-self updates and any operation outside the registered tool list.
+### Why `administrators`
 
-Verify the user cannot SSH in: `ssh claude-mcp@nas.local` should fail (SSH access requires the `administrators` group on DSM).
+DSM 7's admin apps — Package Center, Security Advisor, Control Panel, Resource Monitor — and their corresponding APIs (`SYNO.Core.Package.*`, `SYNO.SecurityAdvisor.*`, etc.) are gated by `administrators` group membership. There is no built-in mechanism to grant a non-admin user selective access to those apps; DSM's "Application Privileges" page (Control Panel → Application Privileges) lists only end-user services like File Station / SMB / AFP, not the admin apps.
+
+So the user has to be an admin. To bound the blast radius:
+
+1. **Password lives only in 1Password.** Generate it via DSM's "Generate Random Password" button, capture into the 1Password item, never type it by hand. There is no manual-login workflow for this account.
+2. **2FA TOTP enforced.** Even with the password, no DSM (or SSH) login without the TOTP code.
+3. **Disable SSH globally** unless you actively need it: Control Panel → Terminal & SNMP → uncheck "Enable SSH service." Admin group implies SSH eligibility; if the service is off, no one can use it.
+4. **Deny all file-protocol access** in Application Privileges (above).
+5. **No shared-folder permissions** — even with admin, this account has no readable filesystem presence.
+6. **Tailscale ACL** restricts the MCP port (and 5001/22 if you leave them on) to your own tailnet devices.
+7. **Bearer token + Origin check** on the MCP endpoint itself — an attacker who somehow got a DSM SID still can't drive :8765 without the wire token.
+
+Residual risk: full DSM compromise if (1Password vault leaks) AND (Tailscale device key leaks) AND (you re-enabled SSH). Acceptable for personal use; document the controls so future-you knows what's load-bearing.
 
 ## 3. 1Password item + service account
 

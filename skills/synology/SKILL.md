@@ -5,7 +5,7 @@ description: Manage a Synology NAS (DSM 7) — packages, security audit, shares 
 
 # Synology NAS
 
-The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS itself. Auth (DSM SID + TOTP) and the wire bearer token are owned by the server — this skill is workflow guidance only.
+The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS itself. Auth (DSM SID + TOTP) and the wire bearer token are owned by the server — this skill is workflow guidance only. The DSM account (`claude-mcp`) is in the `administrators` group because DSM 7 gates the admin APIs on that membership; compensating controls (2FA, no SSH service, Tailscale ACL, bearer token) live outside this skill — don't relax them.
 
 ## When to use
 

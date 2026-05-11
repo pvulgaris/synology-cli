@@ -14,6 +14,12 @@ When a method's response shape changes between DSM minor versions, fail open in 
 
 There are several `synology-*` npm packages. None covered SYNO.Core.Package, SYNO.SecurityAdvisor.*, and SYNO.Core.Share with the field-level options we need. Rolling our own thin client (~200 lines in `dsm.ts`) was cleaner than wrapping a community lib for partial coverage. Don't add a dep here unless one of them grows into mature coverage.
 
+## Why claude-mcp is in `administrators`
+
+DSM 7's admin APIs (`SYNO.Core.Package.*`, `SYNO.SecurityAdvisor.*`, `SYNO.Core.User.*`, `SYNO.Core.Share`, etc.) gate on `administrators` group membership. There is no selective-grant mechanism for non-admin users — DSM's "Application Privileges" page covers only end-user services (File Station, SMB, AFP, ...). An earlier draft of this repo planned a non-admin claude-mcp user with selective Package Center / Security Advisor access; that plan was wrong about what DSM actually supports.
+
+Compensating controls are documented in docs/SETUP.md ("Why administrators"). The short version: password only in 1Password (never typed), 2FA TOTP enforced, no shared-folder access, no SSH service running, Tailscale ACL restricts ports to your devices, bearer + Origin on the MCP endpoint. Residual risk is acceptable for personal use; don't quietly relax these controls.
+
 ## Hard refusals live in `tools/packages.ts`, not in `server.ts`
 
 `HARD_REFUSE_NAMES = new Set(["DSM", "kernel"])`. If you find yourself wanting to add a refusal at the server-registration layer, push it down into the tool function so the JSONL audit log captures the rejected attempt with full args. Server-registration refusals are silent from the audit's perspective.
