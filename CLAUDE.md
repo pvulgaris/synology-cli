@@ -136,54 +136,73 @@ There are several `synology-*` npm packages. None covered SYNO.Core.Package, SYN
 
 The NAS only stores the SMB share config + quota. Backup *state* (last successful, in-progress, errors) is in macOS's `tmutil` on the Mac being backed up. The skill's `SKILL.md` tells Claude to shell out via Bash when running on that Mac; don't try to add an MCP tool for backup state — it would have to SSH to the Mac, which adds a whole separate auth surface we don't want.
 
-## v0.2 roadmap: real write flow
+## Write flow (multi-step DSM install/upgrade)
 
-`nas_package_install` / `_update` / `_uninstall` are stubbed in 0.1.x — they
-return a clear "use DSM UI" error instead of half-working. The DSM 7 install
-flow is multi-step async; we found this out by hitting error code 103 ("method
-does not exist") on a naive single-call `install` and digging into how
-`N4S4/synology-api` Python lib actually does it.
+The full implementation lives in `src/tools/packages.ts`. The six API calls
+are explicitly named so you can grep them when debugging:
 
-The flow to port:
+1. **Catalog lookup**: `SYNO.Core.Package.Server.list?tab=all` for the target
+   id. Pull `link` (url), `md5` (checksum), `size` (filesize), `deppkgs`.
+   Use `tab=all` not `tab=update` — `update` excludes packages not yet
+   installed, which breaks fresh installs.
+2. **Start download**: `SYNO.Core.Package.Installation.install` (yes, the
+   method is `install` for the *download* step) with
+   `operation=install, type=0, blqinst=false, url, name, checksum, filesize`.
+   Returns `{ taskid, progress }`.
+3. **Poll download**: `SYNO.Core.Package.Installation.status` with
+   `task_id`. Repeat every 1.5s until `finished=true` or `has_fail=true`.
+   10-minute timeout for large packages.
+4. **Check downloaded file**: `SYNO.Core.Package.Installation.Download.check`
+   with `task_id`. Returns `filename` (a path on the NAS, typically
+   `/volume1/@tmp/synopkg/…`).
+5. **For fresh install only**: `SYNO.Core.Package.Installation.check` with
+   `id`, `install_type=""`, `install_on_cold_storage=false`,
+   `blCheckDep=false`. Returns `volume_path` (where the package will land).
+6. **Apply**:
+   - **Fresh install**: `SYNO.Core.Package.Installation.install` (the same
+     method name as step 2, but a different call with different args) with
+     `type=0, volume_path, path=file_path, check_codesign=true, force=false,
+     installrunpackage=true, extra_values="{}"`.
+   - **In-place upgrade**: `SYNO.Core.Package.Installation.upgrade` with
+     `task_id, type=0, check_codesign=false, force=false,
+     installrunpackage=true, extra_values="{}"`. Doesn't need
+     `volume_path` (DSM uses the existing location).
 
-1. **Catalog lookup**. `SYNO.Core.Package.Server.list?tab=update` for the
-   target id. Pull `link` (url), `md5` (checksum), `size` (filesize),
-   `version`, and `deppkgs`.
-2. **Start download**. `SYNO.Core.Package.Installation` method `install`
-   with `operation=install, type=0, blqinst=false, url, name, checksum,
-   filesize`. Returns `{ taskid, progress }`.
-3. **Poll download**. `SYNO.Core.Package.Installation` method `status`
-   with `task_id`. Repeat until `finished=true` or `has_fail=true`.
-   `progress` goes 0..1.
-4. **Check downloaded file**. `SYNO.Core.Package.Installation.Download`
-   method `check` with `task_id`. Returns `filename` (file_path).
-5. **Check install feasibility**. `SYNO.Core.Package.Installation` method
-   `check` with `id`, `install_type=""`, `install_on_cold_storage=false`,
-   `breakpkgs=None`, `blCheckDep=false`, `replacepkgs=None`. Returns
-   `volume_path` (where to install).
-6. **Apply**.
-   - Fresh install: `SYNO.Core.Package.Installation` method `install`
-     with `type=0, volume_path, path=file_path, check_codesign=true,
-     force=true, installrunpackage=true, extra_values={}`.
-   - In-place upgrade: `SYNO.Core.Package.Installation` method `upgrade`
-     with `task_id, type=0, check_codesign=false, force=false,
-     installrunpackage=true, extra_values={}`.
+After step 6, poll `SYNO.Core.Package.list` until the installed version
+matches `info.version`. 90s timeout.
 
-For uninstall (single call, much simpler):
-- `SYNO.Core.Package.Uninstallation` method `uninstall` with `id`,
-  `dsm_apps=""`. Our v0.1.4 code passed `dsm_apps: "true"/"false"` which is
-  wrong — that field is a list of DSM apps to also uninstall, not a "keep
-  data" flag. Fix when wiring v0.2.
+**Uninstall** is a single call: `SYNO.Core.Package.Uninstallation.uninstall`
+with `id` and `dsm_apps=""`. The `dsm_apps` field is a list of linked DSM
+apps to remove together, NOT a "keep data" flag — an earlier draft mistook
+it for that.
 
-References: `N4S4/synology-api` repo, `synology_api/core_package.py`,
-methods `download_package`, `get_dowload_package_status`,
-`check_installation_from_download`, `check_installation`,
-`install_package`, `upgrade_package`, `uninstall_package`, `easy_install`.
-Easy_install shows the full orchestration including dependency resolution.
+### Things this code doesn't do (intentional)
 
-Audit log already records write attempts (with `ok: false, error` on the
-stub case), so when v0.2 ships the real flow the JSONL history retroactively
-explains every "DSM UI fallback" event.
+- **Transitive dependency installs**. `nas_package_install` surfaces missing
+  deps with a clear error and asks the user to install each one. Auto-
+  recursion is too much blast radius for a write tool.
+- **Cold-storage installs**. Pass `install_on_cold_storage=false`; if a user
+  hits a package that needs it, they can install via DSM UI.
+- **Package-specific `extra_values`**. SurveillanceStation needs
+  `chkSVS_Alias: true`. We pass `"{}"` and fail loud if DSM requires more.
+- **Progress streaming back to the client**. The HTTP request blocks until
+  the install completes (could be a minute or two). For very large packages
+  consider switching this to MCP progress notifications later.
+- **DSM-app keep/remove flag on uninstall**. We pass `dsm_apps=""` which
+  uninstalls only the named package; if the user wants linked DSM apps
+  removed together, they can do it via DSM UI.
+
+### Reference
+
+`N4S4/synology-api` Python lib, `synology_api/core_package.py` — methods
+`download_package`, `get_dowload_package_status`,
+`check_installation_from_download`, `check_installation`, `install_package`,
+`upgrade_package`, `uninstall_package`, `easy_install`. `easy_install`
+shows the full orchestration including dependency resolution.
+
+The audit log at `/audit/YYYY-MM.jsonl` captures every write attempt with
+`before`, `after`, `task_id`, `target_version`, `ok`, and `error`. Tail it
+when an install/upgrade misbehaves.
 
 ## Deliberately deferred (don't pre-build)
 
