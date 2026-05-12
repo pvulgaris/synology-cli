@@ -316,8 +316,17 @@ async function stopPackage(dsm: DsmClient, packageId: string): Promise<void> {
 
 /** Apply an in-place upgrade (the package was already installed). The
  *  installrunpackage flag tells DSM to start the package back up after the
- *  upgrade completes. */
-async function applyUpgrade(dsm: DsmClient, taskId: string): Promise<void> {
+ *  upgrade completes.
+ *
+ *  volume_path: DSM 7.3 returns code 4501 from this call when the user's
+ *  Package Center "default install volume" is set to "Always ask me"
+ *  (the DSM default). Passing the package's current volume_path explicitly
+ *  bypasses that prompt. We get it from Installation.check just before. */
+async function applyUpgrade(
+  dsm: DsmClient,
+  taskId: string,
+  volumePath: string
+): Promise<void> {
   await dsm.call({
     api: "SYNO.Core.Package.Installation",
     method: "upgrade",
@@ -326,6 +335,7 @@ async function applyUpgrade(dsm: DsmClient, taskId: string): Promise<void> {
     params: {
       task_id: taskId,
       type: 0,
+      volume_path: volumePath,
       check_codesign: false,
       force: false,
       installrunpackage: true,
@@ -387,10 +397,14 @@ export async function nasPackageUpdate(
     targetVersion = info.version;
     taskId = await startDownload(dsm, info);
     await pollDownloadDone(dsm, taskId);
-    // DSM 7.3 errors with code 4501 on `upgrade` when the package is running.
-    // Stop it before the upgrade; installrunpackage:true restarts it after.
+    // DSM may demand a volume_path on upgrade (4501 when "Always ask me" is
+    // the default policy). Resolve the current install volume first.
+    const volumePath = await checkInstallFeasibility(dsm, args.name);
+    // Belt-and-suspenders: stop the package before upgrading. Some DSM
+    // versions also error on .upgrade when the package is running.
+    // installrunpackage:true on applyUpgrade restarts it after.
     await stopPackage(dsm, args.name);
-    await applyUpgrade(dsm, taskId);
+    await applyUpgrade(dsm, taskId, volumePath);
     after = await waitForState(
       dsm,
       args.name,
