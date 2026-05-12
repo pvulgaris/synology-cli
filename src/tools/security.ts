@@ -115,39 +115,63 @@ export async function nasUsersList(dsm: DsmClient) {
   };
 }
 
-// DoS protection (SYNO.Core.Security.DoS) requires a `configs` param — a JSON
-// array of {adapter: <ifname>} entries — and returns per-adapter state, not a
-// single global flag. Discover interfaces first via SYNO.Core.Network.Interface
-// then pass them all to the DoS getter.
+// Firewall API quirks (all DSM 7.x v=1):
+// - Rules: `Firewall.Rules.list` doesn't exist. Profile is the entry point —
+//   list profile names, then `get` each profile to read its rules.
+// - AutoBlock entries need `offset/limit` params; missing them yields 5100
+//   ("Unable to perform"), NOT "empty list".
+// - PortForwarding rules use method=`load`, not `list`. Returns a bare array.
+// - GeoIP `.list` returns the country catalog; per-profile blocking config
+//   lives inside the profile.get response when firewall is enabled.
+// - `Firewall.Adapter.list` doesn't exist on DSM 7 — use Network.Interface.
 export async function nasFirewallList(dsm: DsmClient) {
-  const [firewall, rules, adapters, geoip, autoblock, autoblockRules, interfaces] =
+  const [firewall, profileNames, autoblock, autoblockEntries, portForward, interfaces] =
     await Promise.all([
       dsm
         .call({ api: "SYNO.Core.Security.Firewall", method: "get", version: 1 })
         .catch(() => null),
       dsm
-        .call({ api: "SYNO.Core.Security.Firewall.Rules", method: "list", version: 1 })
-        .catch(() => ({ rules: [] })),
-      dsm
-        .call({ api: "SYNO.Core.Security.Firewall.Adapter", method: "list", version: 1 })
-        .catch(() => ({ adapters: [] })),
-      dsm
-        .call({ api: "SYNO.Core.Security.Firewall.Geoip", method: "get", version: 1 })
-        .catch(() => null),
+        .call({ api: "SYNO.Core.Security.Firewall.Profile", method: "list", version: 1 })
+        .catch(() => ({ profile_names: [] as string[] })),
       dsm
         .call({ api: "SYNO.Core.Security.AutoBlock", method: "get", version: 1 })
         .catch(() => null),
       dsm
-        .call({ api: "SYNO.Core.Security.AutoBlock.Rules", method: "list", version: 1 })
-        .catch(() => ({ rules: [] })),
+        .call({
+          api: "SYNO.Core.Security.AutoBlock.Rules",
+          method: "list",
+          version: 1,
+          params: { offset: 0, limit: -1 },
+        })
+        .catch(() => null),
+      dsm
+        .call<any[]>({ api: "SYNO.Core.PortForwarding.Rules", method: "load", version: 1 })
+        .catch(() => null),
       dsm
         .call<any[]>({ api: "SYNO.Core.Network.Interface", method: "list", version: 1 })
         .catch(() => [] as any[]),
     ]);
-  let dosProtection: any[] | null = null;
+
   const ifnames = (Array.isArray(interfaces) ? interfaces : [])
     .map((i: any) => i?.ifname)
     .filter((n: unknown): n is string => typeof n === "string" && n.length > 0);
+
+  const profiles = await Promise.all(
+    (profileNames?.profile_names ?? []).map(async (name: string) => {
+      const detail = await dsm
+        .call({
+          api: "SYNO.Core.Security.Firewall.Profile",
+          method: "get",
+          version: 1,
+          params: { name },
+        })
+        .catch(() => null);
+      return { name, detail };
+    })
+  );
+
+  // DoS protection per-adapter (form-encoded with configs JSON array).
+  let dosProtection: any[] | null = null;
   if (ifnames.length > 0) {
     try {
       const configs = JSON.stringify(ifnames.map((a) => ({ adapter: a })));
@@ -158,18 +182,17 @@ export async function nasFirewallList(dsm: DsmClient) {
         params: { configs },
       });
     } catch {
-      // surface as null; audit composition will note the gap
+      // surface as null
     }
   }
+
   return {
     firewall_enabled: firewall?.enable_firewall ?? null,
-    firewall_profile: firewall?.profile ?? null,
-    rules: rules?.rules ?? [],
-    adapters: adapters?.adapters ?? [],
-    geoip,
+    profiles,
     auto_block: autoblock,
-    auto_block_rules: autoblockRules?.rules ?? [],
+    auto_block_entries: autoblockEntries?.rules ?? autoblockEntries ?? [],
     dos_protection: dosProtection,
+    port_forwarding: Array.isArray(portForward) ? portForward : (portForward as any)?.rules ?? null,
   };
 }
 
