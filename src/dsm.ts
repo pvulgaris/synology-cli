@@ -12,7 +12,6 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Agent } from "undici";
 import type { Config } from "./config.js";
 import { currentTotpCode, loadCredentials, type Credentials } from "./auth.js";
 
@@ -78,14 +77,8 @@ export class DsmClient {
   // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
   private loginInFlight: Promise<void> | null = null;
-  // Per-fetch dispatcher so DSM's self-signed cert is accepted ONLY here,
-  // not process-wide. Other outbound HTTPS keeps Node's default verification.
-  private dispatcher: Agent;
 
   constructor(private cfg: Config) {
-    this.dispatcher = new Agent({
-      connect: { rejectUnauthorized: cfg.tlsRejectUnauthorized },
-    });
     const cachePath = process.env.DSM_SID_CACHE_FILE;
     if (cachePath) {
       const cached = readSidCache(cachePath);
@@ -121,7 +114,7 @@ export class DsmClient {
     url.searchParams.set("format", "sid");
     url.searchParams.set("session", "synology-nas-mcp");
 
-    const res = await fetch(url, { method: "GET", dispatcher: this.dispatcher } as any);
+    const res = await fetch(url, { method: "GET" });
     const body = (await res.json()) as DsmResponse<{ sid: string }>;
     if (!body.success || !body.data?.sid) {
       const code = body.error?.code ?? -1;
@@ -190,7 +183,7 @@ export class DsmClient {
           body: body.toString(),
         }
       : { method: "GET" };
-    const res = await fetch(url, { ...init, dispatcher: this.dispatcher } as any);
+    const res = await fetch(url, init);
     const json = (await res.json()) as DsmResponse<T>;
     if (!json.success) {
       const code = json.error?.code ?? -1;

@@ -21,11 +21,17 @@ import { DsmClient } from "./dsm.js";
 import { startHttpDaemon } from "./http.js";
 
 async function serveStdio() {
-  // TLS verification for DSM's self-signed cert is handled per-fetch inside
-  // DsmClient via a scoped undici dispatcher — we deliberately do NOT set
-  // process-wide NODE_TLS_REJECT_UNAUTHORIZED here, so other outbound HTTPS
-  // calls (op CLI fetches, any future webhook, etc.) still verify normally.
   const cfg = loadConfig();
+  // Process-wide TLS skip for DSM's self-signed cert. We tried a per-fetch
+  // undici dispatcher in v0.2.12 but it interacted badly with Node 22's
+  // built-in fetch (intermittent "fetch failed" + silently-empty responses
+  // on some endpoints). The blast radius of process-wide skip is bounded:
+  // the daemon only talks to DSM at cfg.dsmBaseUrl; there are no other
+  // outbound HTTPS calls. If you add one, route it explicitly through a
+  // verifying agent or restore the per-fetch scoping.
+  if (!cfg.tlsRejectUnauthorized) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  }
   const dsm = new DsmClient(cfg);
   const server = createServer(cfg, dsm);
   const transport = new StdioServerTransport();
@@ -35,6 +41,9 @@ async function serveStdio() {
 
 async function serveHttp() {
   const cfg = loadConfig();
+  if (!cfg.tlsRejectUnauthorized) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  }
   await startHttpDaemon(cfg);
 }
 
