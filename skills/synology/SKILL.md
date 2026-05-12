@@ -28,8 +28,8 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 | `nas_package_info` | metadata for one package (publisher, changelog, deps) |
 | `nas_security_advisor_scan` | Security Advisor findings, grouped by severity |
 | `nas_users_list` | accounts, 2FA on/off, expired flag |
-| `nas_firewall_list` | rules, auto-block, DoS protection |
-| `nas_dsm_security_settings` | web hardening (CSRF/CSP/IP-check/session-timeout), SSH, SMB, auto-update, password policy |
+| `nas_firewall_list` | rules, auto-block, per-adapter DoS protection |
+| `nas_dsm_security_settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, auto-update, password policy |
 | `nas_shares_list` | shares incl. encryption, quota (mb used/total), recycle-bin, snapshot support |
 
 **Write tools (per-call user confirmation required, see Write flow below):**
@@ -74,9 +74,7 @@ First-time-only gotcha: if Package Center API calls return weird errors on a fre
 - Kernel-flagged packages — same reason.
 - Firewall rule edits, 2FA enforcement changes, SMB protocol toggles — not implemented as writes. Surface as findings with the DSM UI path to fix.
 
-**Known read-tool gaps** (covered by Security Advisor findings; fix path is HITL HAR capture):
-- HTTPS-enforce + min-TLS toggle — `SYNO.Core.Web.DSM` requires JSON-format requests our client doesn't speak.
-- `SYNO.Core.Security.DoS.get` — returns 114 / 101 across versions; needs different params or a different API name.
+**DSM API gotcha** — `SYNO.API.Info`'s `requestFormat:"JSON"` describes the *response*, not the request. Every working DSM endpoint expects form-encoded params (GET querystring or POST `application/x-www-form-urlencoded`) regardless of what API.Info says. Array-typed params like `configs=[{"adapter":"eth0"}, ...]` go as a single form field whose value is the JSON-stringified array.
 
 ## Protected packages (local config)
 

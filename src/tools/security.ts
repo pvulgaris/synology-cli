@@ -115,8 +115,12 @@ export async function nasUsersList(dsm: DsmClient) {
   };
 }
 
+// DoS protection (SYNO.Core.Security.DoS) requires a `configs` param — a JSON
+// array of {adapter: <ifname>} entries — and returns per-adapter state, not a
+// single global flag. Discover interfaces first via SYNO.Core.Network.Interface
+// then pass them all to the DoS getter.
 export async function nasFirewallList(dsm: DsmClient) {
-  const [firewall, rules, adapters, geoip, autoblock, autoblockRules, dos] =
+  const [firewall, rules, adapters, geoip, autoblock, autoblockRules, interfaces] =
     await Promise.all([
       dsm
         .call({ api: "SYNO.Core.Security.Firewall", method: "get", version: 1 })
@@ -137,9 +141,26 @@ export async function nasFirewallList(dsm: DsmClient) {
         .call({ api: "SYNO.Core.Security.AutoBlock.Rules", method: "list", version: 1 })
         .catch(() => ({ rules: [] })),
       dsm
-        .call({ api: "SYNO.Core.Security.DoS", method: "get", version: 1 })
-        .catch(() => null),
+        .call<any[]>({ api: "SYNO.Core.Network.Interface", method: "list", version: 1 })
+        .catch(() => [] as any[]),
     ]);
+  let dosProtection: any[] | null = null;
+  const ifnames = (Array.isArray(interfaces) ? interfaces : [])
+    .map((i: any) => i?.ifname)
+    .filter((n: unknown): n is string => typeof n === "string" && n.length > 0);
+  if (ifnames.length > 0) {
+    try {
+      const configs = JSON.stringify(ifnames.map((a) => ({ adapter: a })));
+      dosProtection = await dsm.call({
+        api: "SYNO.Core.Security.DoS",
+        method: "get",
+        version: 2,
+        params: { configs },
+      });
+    } catch {
+      // surface as null; audit composition will note the gap
+    }
+  }
   return {
     firewall_enabled: firewall?.enable_firewall ?? null,
     firewall_profile: firewall?.profile ?? null,
@@ -148,29 +169,47 @@ export async function nasFirewallList(dsm: DsmClient) {
     geoip,
     auto_block: autoblock,
     auto_block_rules: autoblockRules?.rules ?? [],
-    dos_protection: dos,
+    dos_protection: dosProtection,
   };
 }
 
-// `SYNO.Core.Security.DSM` v4 returns CSRF / CSP / session-timeout fields but
-// NOT the HTTPS-enforce or min-TLS toggles — those live on a different API
-// (SYNO.Core.Web.DSM, SYNO.Core.Service.PortForwarding, or similar) that
-// requires JSON request format which our DsmClient doesn't support yet. Skip
-// for now; covered separately in the open Phase 4 list.
+// DSM's HTTPS-enforce + HSTS toggles live on SYNO.Core.Web.DSM v=2; the TLS
+// profile lives on SYNO.Core.Web.Security.TLSProfile v=1. Both apis report
+// requestFormat:"JSON" in API.Info but that describes the RESPONSE — the
+// request itself is form-encoded like everything else. (Working clients
+// confirmed: synaudit, NielsKrijnen, N4S4, synology-community/go-synology.)
 export async function nasDsmSecuritySettings(dsm: DsmClient) {
-  const [security, terminal, smb, autoUpdate, passwd] = await Promise.all([
+  const [security, web, tlsProfile, terminal, smb, autoUpdate, passwd] = await Promise.all([
     dsm.call({ api: "SYNO.Core.Security.DSM", method: "get", version: 4 }).catch(() => null),
+    dsm.call({ api: "SYNO.Core.Web.DSM", method: "get", version: 2 }).catch(() => null),
+    dsm.call({ api: "SYNO.Core.Web.Security.TLSProfile", method: "get", version: 1 }).catch(() => null),
     dsm.call({ api: "SYNO.Core.Terminal", method: "get", version: 3 }).catch(() => null),
     dsm.call({ api: "SYNO.Core.FileServ.SMB", method: "get", version: 3 }).catch(() => null),
     dsm.call({ api: "SYNO.Core.Upgrade.Setting", method: "get", version: 3 }).catch(() => null),
     dsm.call({ api: "SYNO.Core.User.PasswordPolicy", method: "get", version: 1 }).catch(() => null),
   ]);
+  const tlsServices = (tlsProfile?.services ?? {}) as Record<string, any>;
   return {
     web_hardening: {
+      https_redirect: web?.enable_https_redirect ?? null,
+      hsts: web?.enable_hsts ?? null,
+      http_port: web?.http_port ?? null,
+      https_port: web?.https_port ?? null,
       csrf_protection: security?.enable_csrf_protection ?? null,
       csp_header: security?.csp_header_option ?? null,
       ip_check: security?.skip_ip_checking === false ? true : security?.skip_ip_checking === true ? false : null,
       session_timeout_min: security?.timeout ?? null,
+    },
+    // TLS profile levels: 0=Compatible (weakest), 1=Intermediate, 2=Modern.
+    // `current-level` per service overrides `default-level`.
+    tls_profile: {
+      default_level: tlsProfile?.["default-level"] ?? null,
+      services: Object.fromEntries(
+        Object.entries(tlsServices).map(([k, v]: [string, any]) => [
+          k,
+          { level: v?.["current-level"] ?? null, display: v?.["display-name"] },
+        ])
+      ),
     },
     ssh_enabled: terminal?.enable_ssh ?? null,
     ssh_port: terminal?.ssh_port,
