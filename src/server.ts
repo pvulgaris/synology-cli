@@ -12,6 +12,7 @@ import { z } from "zod";
 import type { Config } from "./config.js";
 import type { DsmClient } from "./dsm.js";
 import { SERVER_INSTRUCTIONS } from "./instructions.js";
+import { VERSION } from "./version.js";
 import { nasStatus, nasStorageHealth } from "./tools/system.js";
 import {
   nasPackagesList,
@@ -57,7 +58,7 @@ function safeTool<A>(fn: (args: A) => Promise<unknown>) {
 
 export function createServer(cfg: Config, dsm: DsmClient): McpServer {
   const server = new McpServer(
-    { name: "synology-nas-mcp", version: "0.2.6" },
+    { name: "synology-nas-mcp", version: VERSION },
     { instructions: SERVER_INSTRUCTIONS }
   );
 
@@ -137,7 +138,7 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_package_install",
-    "Install a package from the official Synology repo. Runs the full DSM multi-step flow: catalog lookup → download → verify → install. Refuses missing dependencies (install those first). Refuses DSM/kernel. Mutating — confirm with user before calling. Verifies post-state.",
+    "Install a package from the official Synology repo. Runs the DSM UI's single-call install sequence (feasibility_check → get_queue → Installation.check → Installation.install with operation=\"install\"). Refuses DSM/kernel. Refuses if already installed (use nas_package_update). Mutating — confirm with user before calling. Verifies post-state by polling Package.list for the version flip.",
     {
       name: z.string().describe("Package id to install (e.g. 'TextEditor')"),
       version: z
@@ -157,7 +158,7 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_package_update",
-    "Update an installed package to the latest version from the official Synology repo. Runs the full DSM multi-step flow: catalog lookup → download → verify → upgrade. Refuses DSM/kernel. Refuses if package is already current. Mutating — confirm with user before calling. Verifies post-state.",
+    "Update an installed package to the latest version. Runs the DSM UI's actual upgrade sequence (feasibility_check → get_queue → Installation.check → Installation.upgrade with operation=\"upgrade\"). Refuses DSM/kernel. Refuses if package is already current. Mutating — confirm with user before calling. Verifies post-state by polling Package.list for the version flip.",
     { name: z.string().describe("Package id to update") },
     safeTool((args) => nasPackageUpdate(cfg, dsm, args))
   );

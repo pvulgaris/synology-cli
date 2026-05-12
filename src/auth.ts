@@ -33,11 +33,21 @@ async function opRead(ref: string): Promise<string> {
 }
 
 export async function loadCredentials(cfg: Config): Promise<Credentials> {
+  // Env-var fast path. Useful for local dev: `source dev/source-creds.sh` once
+  // (one Touch ID round-trip), then iterate without re-prompting 1Password on
+  // every harness run. Production still uses `op read` via the service-account
+  // token baked into the container.
+  const envPw = process.env.DSM_PASSWORD;
+  const envTotp = process.env.DSM_TOTP_SECRET;
+  const envBearer = process.env.MCP_BEARER_TOKEN;
+  if (envPw && envTotp && envBearer) {
+    return { password: envPw, totpSecret: envTotp, bearerToken: envBearer };
+  }
   const base = `op://${cfg.opVault}/${cfg.opItem}`;
   const [password, totpSecret, bearerToken] = await Promise.all([
-    opRead(`${base}/password`),
-    opRead(`${base}/totp`),
-    opRead(`${base}/mcp_bearer_token`),
+    envPw ?? opRead(`${base}/password`),
+    envTotp ?? opRead(`${base}/totp`),
+    envBearer ?? opRead(`${base}/mcp_bearer_token`),
   ]);
   return { password, totpSecret, bearerToken };
 }

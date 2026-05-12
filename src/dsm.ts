@@ -10,10 +10,37 @@
  * process-wide at startup. We do not paper over that here.
  */
 
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { Agent } from "undici";
 import type { Config } from "./config.js";
 import { currentTotpCode, loadCredentials, type Credentials } from "./auth.js";
 
 const SID_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Dev-only: persist the SID across `tsx` invocations so the harness doesn't
+// burn a TOTP code on every run. DSM rejects reuse within the same 30s window
+// with code 404 on login. In production the daemon stays up so this is a
+// no-op; the env var is set only by dev/source-creds.sh.
+function readSidCache(path: string): { sid: string; at: number } | null {
+  try {
+    const raw = readFileSync(path, "utf8");
+    const j = JSON.parse(raw);
+    if (typeof j?.sid === "string" && typeof j?.at === "number") return j;
+  } catch {
+    // missing or unparsable → treat as cache miss
+  }
+  return null;
+}
+
+function writeSidCache(path: string, sid: string): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ sid, at: Date.now() }), { mode: 0o600 });
+  } catch {
+    // best-effort; dev convenience only
+  }
+}
 
 export interface DsmResponse<T = any> {
   success: boolean;
@@ -47,13 +74,38 @@ export class DsmClient {
   private creds: Credentials | null = null;
   private sid: string | null = null;
   private sidObtainedAt = 0;
+  // Concurrent ensureSession() calls share the in-flight login. Without this,
+  // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
+  // same 30s TOTP code; DSM accepts the first and 404s the rest.
+  private loginInFlight: Promise<void> | null = null;
+  // Per-fetch dispatcher so DSM's self-signed cert is accepted ONLY here,
+  // not process-wide. Other outbound HTTPS keeps Node's default verification.
+  private dispatcher: Agent;
 
-  constructor(private cfg: Config) {}
+  constructor(private cfg: Config) {
+    this.dispatcher = new Agent({
+      connect: { rejectUnauthorized: cfg.tlsRejectUnauthorized },
+    });
+    const cachePath = process.env.DSM_SID_CACHE_FILE;
+    if (cachePath) {
+      const cached = readSidCache(cachePath);
+      if (cached && Date.now() - cached.at < SID_TTL_MS) {
+        this.sid = cached.sid;
+        this.sidObtainedAt = cached.at;
+      }
+    }
+  }
 
   private async ensureSession(): Promise<void> {
     if (!this.creds) this.creds = await loadCredentials(this.cfg);
     const fresh = this.sid && Date.now() - this.sidObtainedAt < SID_TTL_MS;
-    if (!fresh) await this.login();
+    if (fresh) return;
+    if (!this.loginInFlight) {
+      this.loginInFlight = this.login().finally(() => {
+        this.loginInFlight = null;
+      });
+    }
+    await this.loginInFlight;
   }
 
   private async login(): Promise<void> {
@@ -69,7 +121,7 @@ export class DsmClient {
     url.searchParams.set("format", "sid");
     url.searchParams.set("session", "synology-nas-mcp");
 
-    const res = await fetch(url, { method: "GET" });
+    const res = await fetch(url, { method: "GET", dispatcher: this.dispatcher } as any);
     const body = (await res.json()) as DsmResponse<{ sid: string }>;
     if (!body.success || !body.data?.sid) {
       const code = body.error?.code ?? -1;
@@ -83,6 +135,8 @@ export class DsmClient {
     }
     this.sid = body.data.sid;
     this.sidObtainedAt = Date.now();
+    const cachePath = process.env.DSM_SID_CACHE_FILE;
+    if (cachePath) writeSidCache(cachePath, this.sid);
   }
 
   /**
@@ -136,7 +190,7 @@ export class DsmClient {
           body: body.toString(),
         }
       : { method: "GET" };
-    const res = await fetch(url, init);
+    const res = await fetch(url, { ...init, dispatcher: this.dispatcher } as any);
     const json = (await res.json()) as DsmResponse<T>;
     if (!json.success) {
       const code = json.error?.code ?? -1;
@@ -156,9 +210,13 @@ export class DsmClient {
         `${opts.api}.${opts.method} failed (code ${code})${detail}`
       );
     }
-    // Success: log a one-liner so we know order/timing without dumping the
-    // full data (which can be huge for list responses).
-    console.error(`[dsm] ✓ ${opts.api}.${opts.method}`);
+    if (process.env.DEBUG_DSM_RESPONSES === "1") {
+      const blob = JSON.stringify(json.data ?? {});
+      const trimmed = blob.length > 1500 ? blob.slice(0, 1500) + "…" : blob;
+      console.error(`[dsm] ✓ ${opts.api}.${opts.method}`, trimmed);
+    } else {
+      console.error(`[dsm] ✓ ${opts.api}.${opts.method}`);
+    }
     return (json.data ?? ({} as T));
   }
 

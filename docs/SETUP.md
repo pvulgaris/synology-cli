@@ -107,14 +107,27 @@ Use Container Manager's **Project** feature, not Container. Project mode reads
 
 ### Upgrades
 
-1. Rebuild + save tar on your Mac:
-   ```sh
-   docker build --platform linux/amd64 -t synology-nas-mcp:latest .
-   docker save synology-nas-mcp:latest -o ~/Downloads/synology-nas-mcp-latest.tar
-   ```
-2. Upload tar to `/volume1/docker/synology-nas-mcp/` (overwrite the old one).
-3. Container Manager → **Image** → Add from file → the new tar (this updates `:latest` in DSM's local image store).
-4. Container Manager → **Project** → `synology-nas-mcp` → **Action → Build** (recreates the container with the new image digest; `.env` persists).
+```sh
+docker build --platform linux/amd64 -t synology-nas-mcp:<ver> -t synology-nas-mcp:latest .
+docker save synology-nas-mcp:<ver> synology-nas-mcp:latest -o ~/Downloads/synology-nas-mcp-<ver>.tar
+source dev/source-creds.sh   # once per shell; cached 4h
+npm run deploy                # imports image → stops+builds+starts project → polls /health
+```
+
+Total wall time on Tailscale: ~30 seconds, most of it the 60 MB tar upload.
+
+`npm run deploy` walks the DSM Web API end-to-end:
+
+1. POST the tar to `/webapi/entry.cgi/SYNO.Docker.Image?api=…&method=upload&version=1` (the chunked-upload URL pattern the Container Manager UI uses; multipart-form field name is `filename`, X-SYNO-TOKEN header required). DSM imports the tar straight into its local Docker registry — no FileStation, no on-disk staging, no shared-folder ACL involved.
+2. `SYNO.Docker.Project.list` to look up the project UUID by name.
+3. `SYNO.Docker.Project.stop` → `Project.build` → `Project.start` to recycle the container with the freshly-imported `:latest`.
+4. Poll `http://<nas>:8765/health` until the response body's `version` matches `package.json`'s. Bails after 120 seconds with the last response text.
+
+Exits non-zero on any step failure with a precise reason. No additional DSM permissions are required beyond what claude-mcp already has (administrators group, which it joined during setup).
+
+To use a separate admin identity for deploys (e.g. keep claude-mcp's runtime token completely separate from deploy auth), set `DSM_DEPLOY_USER`, `DSM_DEPLOY_PASSWORD`, and `DSM_DEPLOY_TOTP_SECRET` env vars before `npm run deploy`.
+
+Manual fallback (no script needed): import the tar via Container Manager UI → click Project → Action → Build. Same outcome, six clicks instead of one command.
 
 ## 7. Verify
 
@@ -122,7 +135,7 @@ From a Mac on the tailnet (read the bearer token via `op read "op://<vault>/Syno
 
 ```sh
 TOKEN=$(op read "op://<vault>/Synology DSM - claude-mcp/mcp_bearer_token")
-curl -i -H "Authorization: Bearer $TOKEN" http://nas.local:8765/healthz
+curl -i http://nas.local:8765/health
 # expect: 200 OK {"ok":true,"server":"synology-nas-mcp","version":"0.1.0"}
 
 curl -i -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \

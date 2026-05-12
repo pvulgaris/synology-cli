@@ -10,12 +10,10 @@
 # Container Manager → Project → Create → "Use existing docker-compose.yml" →
 # point at the directory above.
 #
-# Upgrade path:
-#   1. Build a new image locally (host arch can be anything; we cross-build to linux/amd64).
-#   2. `docker save synology-nas-mcp:latest -o synology-nas-mcp-latest.tar`
-#   3. Upload the tar to the NAS, import via Container Manager → Image.
-#   4. Container Manager → Project → synology-nas-mcp → Action → Build.
-#   The .env file persists; no env re-entry.
+# Upgrade path: run `npm run deploy` from the repo on your Mac. It uploads
+# the tar, imports the image, stops + recreates this project, and verifies
+# the new version on /health — all via DSM Web API, no UI clicks. See
+# docs/SETUP.md for the one-time setup that enables it.
 
 services:
   synology-nas-mcp:
@@ -23,6 +21,13 @@ services:
     container_name: synology-nas-mcp
     restart: unless-stopped
     network_mode: host
+    # Defense in depth — the daemon runs as `node` (uid 1000) inside the
+    # container and drops every Linux capability. The bearer + Origin checks
+    # at /mcp do the actual access control; this just narrows blast radius.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       OP_SERVICE_ACCOUNT_TOKEN: ${OP_SERVICE_ACCOUNT_TOKEN}
       DSM_BASE_URL: ${DSM_BASE_URL}

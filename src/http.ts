@@ -7,6 +7,7 @@
  *     (defense against DNS rebinding per MCP spec recommendations).
  */
 
+import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import os from "node:os";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -14,6 +15,7 @@ import type { Config } from "./config.js";
 import { loadCredentials } from "./auth.js";
 import { DsmClient } from "./dsm.js";
 import { createServer } from "./server.js";
+import { VERSION } from "./version.js";
 
 function resolveBindHost(cfg: Config): string {
   if (cfg.mcpBindHost) return cfg.mcpBindHost;
@@ -70,13 +72,23 @@ export async function startHttpDaemon(
 
   // Health endpoint — bypasses auth so you can curl it from a tailnet host
   // without rotating the bearer token. Returns no NAS state.
-  app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, server: "synology-nas-mcp", version: "0.2.6" });
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true, server: "synology-nas-mcp", version: VERSION });
   });
 
-  // Auth + Origin middleware applied to /mcp.
+  // Auth + Origin middleware applied to /mcp. The bearer compare uses
+  // `crypto.timingSafeEqual` over equal-length Buffers (with a fixed-time
+  // length pre-check) so a network observer can't time the prefix of a
+  // probe token to recover the real one. Defense in depth — the tailnet
+  // ACL is the primary control.
+  const expectedBuf = Buffer.from(expected, "utf8");
   const authMw: express.RequestHandler = (req, res, next) => {
-    if (req.header("authorization") !== expected) {
+    const got = req.header("authorization") ?? "";
+    const gotBuf = Buffer.from(got, "utf8");
+    const equal =
+      gotBuf.length === expectedBuf.length &&
+      timingSafeEqual(gotBuf, expectedBuf);
+    if (!equal) {
       res.status(401).json({ error: "missing or invalid bearer token" });
       return;
     }

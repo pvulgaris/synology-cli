@@ -1,6 +1,6 @@
 {
   "name": "synology-nas-mcp",
-  "version": "0.2.6",
+  "version": "0.2.13",
   "description": "MCP server for managing a Synology NAS (DSM 7) — packages, security audit, shares. Deploys as a container on the NAS itself; reachable from your Macs over Tailscale.",
   "type": "module",
   "license": "MIT",
@@ -12,7 +12,7 @@
   "homepage": "https://github.com/pvulgaris/synology-nas-mcp#readme",
   "bugs": "https://github.com/pvulgaris/synology-nas-mcp/issues",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "keywords": [
     "synology",
@@ -33,12 +33,14 @@
     "prepare": "tsc",
     "dev": "tsx src/cli.ts",
     "serve": "node dist/cli.js serve",
-    "daemon": "node dist/cli.js daemon"
+    "daemon": "node dist/cli.js daemon",
+    "deploy": "tsx src/dev/runner.ts deploy"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "express": "^5.2.1",
     "otplib": "^12.0.1",
+    "undici": "^8.2.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

@@ -15,7 +15,9 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 - **Security audit**: "audit security", "is my NAS configured safely?" — compose Security Advisor scan + users + firewall + DSM settings + shares + storage.
 - **Time Machine inspection**: NAS-side share config + quota. For Mac-side backup *state*, see below.
 
-## Tool inventory (read freely)
+## Tool inventory
+
+**Read tools (free to invoke):**
 
 | Tool | Returns |
 |---|---|
@@ -30,11 +32,19 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 | `nas_dsm_security_settings` | HTTPS, SSH, SMB, auto-update, password policy |
 | `nas_shares_list` | shares incl. Time-Machine flag + quota |
 
+**Write tools (per-call user confirmation required, see Write flow below):**
+
+| Tool | Effect | Returns |
+|---|---|---|
+| `nas_package_install` | Install a new package from the Synology repo | `{ before, after, verified }` |
+| `nas_package_update` | Update an installed package to latest | `{ before, after, verified }` |
+| `nas_package_uninstall` | Remove an installed package | `{ before, after, removed }` |
+
 ## Write flow
 
-Every write requires explicit per-call user confirmation. **No silent writes, no batched writes across multiple packages in one turn.**
+All three write tools (install, uninstall, update) require explicit per-call user confirmation. **No silent writes, no batched writes across multiple packages in one turn.**
 
-For each mutating action (install / uninstall / update):
+For each call:
 
 1. Read the current state first (`nas_packages_list` or `nas_package_info`).
 2. Render this exact confirmation block in prose and wait for a literal `yes`:
@@ -44,13 +54,20 @@ For each mutating action (install / uninstall / update):
      action:  <install | uninstall | update>
      before:  <current version or "not installed">
      after:   <expected version or "removed">
-     (keep_data: <true|false>  — only for uninstall)
    Confirm? (yes/no)
    ```
    Anything other than `yes` aborts. Don't infer consent from "sure", "ok", "go ahead".
 3. Call the write tool with exactly the args you just confirmed.
 4. The tool returns `{ before, after, verified | removed }`. Check `verified === true` (or `removed === true`). On any mismatch, surface it loudly — silent drift is the worst outcome.
 5. Repeat from step 1 for the next package. Never bundle multiple write tool calls in a single turn.
+
+### Mechanics (install + update)
+
+Both run the same DSM-UI-equivalent single-call sequence: `Package.feasibility_check` → `Installation.get_queue` → `Installation.check` (v=2) → `Installation.{install,upgrade}` with the catalog URL/checksum/size as a single call (no separate task_id download phase, despite what N4S4's docs claim). Then poll until the version flips on `Package.list`. Cleanup of the staged .spk in `/run/synopkg/tmp/` is best-effort.
+
+If a write returns `verified: false`, surface the entire `{ before, after, error }` payload to the user. Don't retry automatically — the most likely cause is a Package Center precondition (TOS acceptance for a fresh user, package conflict, etc.) that needs human judgment.
+
+First-time-only gotcha: if Package Center API calls return weird errors on a freshly-set-up `claude-mcp` account, the user may need to log into DSM UI **as `claude-mcp` once** and accept the Package Center TOS. Surface this as a hypothesis if a package operation behaves unexpectedly on a brand-new install — for an established install it doesn't apply.
 
 **Server-side hard refusals** (the MCP will reject with an error):
 - `nas_package_update("DSM")` — DSM self-updates are out of scope; apply via DSM UI.
@@ -77,8 +94,9 @@ If you're invoked from a context without local Bash to the backing-up Mac (e.g.,
 
 Every write is logged to `/volume1/docker/synology-nas-mcp/audit/YYYY-MM.jsonl` on the NAS, with timestamp, tool, args, before/after state, ok flag, and error message if any. Surface this path when the user asks "what did Claude do?" — they can read it themselves.
 
+
 ## Composition examples (do not script — Claude composes)
 
-- **Package update from a Synology notification email**: search Gmail for the notification → cross-reference with `nas_packages_check_updates` → render per-package summary → confirm one at a time → update → verify → archive the email when all confirmed updates succeed.
+- **Package update from a Synology notification email**: search Gmail for the notification → cross-reference with `nas_packages_check_updates` → render per-package summary → confirm one at a time → `nas_package_update` (verifies post-state internally) → archive the email when all confirmed updates succeed.
 - **Security audit**: fan out reads in parallel, group findings by severity, present DSM-UI fix paths (never auto-remediate).
 - **Cleanup**: list packages, bucket as active / dormant / candidate (system + protected packages never appear as candidates), present dormant + candidate list with reasoning, confirm one at a time.

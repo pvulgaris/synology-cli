@@ -28,6 +28,6 @@ export async function recordWrite(
   const full: AuditRecord = { ts, ...rec };
   const month = ts.slice(0, 7); // YYYY-MM
   const file = path.join(cfg.auditLogDir, `${month}.jsonl`);
-  await fs.mkdir(cfg.auditLogDir, { recursive: true });
+  await fs.mkdir(cfg.auditLogDir, { recursive: true, mode: 0o700 });
   await fs.appendFile(file, JSON.stringify(full) + "\n", { mode: 0o600 });
 }

@@ -21,10 +21,11 @@ import { DsmClient } from "./dsm.js";
 import { startHttpDaemon } from "./http.js";
 
 async function serveStdio() {
+  // TLS verification for DSM's self-signed cert is handled per-fetch inside
+  // DsmClient via a scoped undici dispatcher — we deliberately do NOT set
+  // process-wide NODE_TLS_REJECT_UNAUTHORIZED here, so other outbound HTTPS
+  // calls (op CLI fetches, any future webhook, etc.) still verify normally.
   const cfg = loadConfig();
-  if (!cfg.tlsRejectUnauthorized) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
   const dsm = new DsmClient(cfg);
   const server = createServer(cfg, dsm);
   const transport = new StdioServerTransport();
@@ -34,9 +35,6 @@ async function serveStdio() {
 
 async function serveHttp() {
   const cfg = loadConfig();
-  if (!cfg.tlsRejectUnauthorized) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
   await startHttpDaemon(cfg);
 }
 

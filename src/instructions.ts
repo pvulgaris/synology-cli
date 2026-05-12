@@ -6,8 +6,9 @@
 export const SERVER_INSTRUCTIONS = `
 Synology DSM NAS management. Read tools (status, packages list / check_updates / info,
 security advisor scan, users, firewall, dsm settings, shares, storage health) are safe
-to invoke freely. Write tools (package install / uninstall / update) MUST be confirmed
-with the user explicitly ('yes', literal) before calling — one package per turn.
+to invoke freely. Write tools (nas_package_install / nas_package_uninstall /
+nas_package_update) MUST be confirmed with the user explicitly ('yes', literal) before
+calling — one package per turn.
 
 Hard refusals (server-side, will reject 4xx-style): updating DSM itself, updating kernel
 packages, anything else not in the registered tool list. For findings that suggest

@@ -7,7 +7,7 @@
 # Credentials live in 1Password; the container reads them at startup via
 # the `op` CLI using a service-account token mounted as OP_SERVICE_ACCOUNT_TOKEN.
 
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
@@ -15,7 +15,7 @@ COPY src ./src
 # present before `npm ci`. Don't reorder these lines.
 RUN npm ci
 
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 
 # Install 1Password CLI. Pinned at minor; bump when needed.
@@ -46,6 +46,14 @@ ENV MCP_BIND_PORT=8765
 ENV AUDIT_LOG_DIR=/audit
 
 VOLUME /audit
+
+# NOTE: we deliberately do NOT set `USER node`. The compose file bind-mounts
+# the host's audit/ directory to /audit, and that host directory's uid won't
+# match the container's `node` user (uid 1000). The hardening we DO ship is
+# `cap_drop: ALL` + `no-new-privileges` in the compose file, which neuters
+# in-container root. To run as the `node` user safely, you'd also need to
+# `chown -R 1000:1000` the host audit directory; left as a manual step for
+# anyone who wants to take that on.
 
 ENTRYPOINT ["node", "dist/cli.js"]
 CMD ["daemon"]
