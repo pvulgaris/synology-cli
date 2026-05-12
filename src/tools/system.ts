@@ -25,36 +25,40 @@ export async function nasStatus(dsm: DsmClient) {
   };
 }
 
+// Single-call alternative to SYNO.Core.Storage.Volume.list — returns volumes,
+// disks, and storagePools in one shot. Used by HA's py-synologydsm-api and N4S4
+// against DSM 7.x. The .Volume.list path requires SYNO.API.Info version
+// negotiation; this one doesn't.
 export async function nasStorageHealth(dsm: DsmClient) {
-  const [volumes, disks] = await Promise.all([
-    dsm.call({
-      api: "SYNO.Core.Storage.Volume",
-      method: "list",
-      version: 1,
-    }),
-    dsm.call({
-      api: "SYNO.Storage.CGI.Storage",
-      method: "load_info",
-      version: 1,
-    }).catch(() => null),
-  ]);
+  const info = await dsm.call({
+    api: "SYNO.Storage.CGI.Storage",
+    method: "load_info",
+    version: 1,
+  });
   return {
-    volumes: (volumes?.volumes ?? []).map((v: any) => ({
+    volumes: (info?.volumes ?? []).map((v: any) => ({
       id: v.id,
       status: v.status,
       fs: v.fs_type,
-      size_total: v.size?.total,
-      size_used: v.size?.used,
-      raid_level: v.raid_type,
+      size_total: Number(v.size?.total),
+      size_used: Number(v.size?.used),
+      device_type: v.device_type,
     })),
-    drives: (disks?.disks ?? []).map((d: any) => ({
+    drives: (info?.disks ?? []).map((d: any) => ({
       id: d.id,
+      name: d.name,
       model: d.model,
+      vendor: d.vendor,
       status: d.status,
       smart_status: d.smart_status,
       temp_c: d.temp,
-      size: d.size_total,
-      slot: d.diskPath ?? d.slot,
+      size: Number(d.size_total),
+      disk_type: d.diskType,
+    })),
+    pools: (info?.storagePools ?? []).map((p: any) => ({
+      deploy_path: p.deploy_path,
+      disks: p.disks,
+      pool_children: (p.pool_child ?? []).map((c: any) => ({ id: c.id, size: c.size })),
     })),
   };
 }
