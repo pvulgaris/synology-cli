@@ -43,6 +43,112 @@ const SUITE: Record<string, (dsm: DsmClient) => Promise<unknown>> = {
   nas_data_protection: nasDataProtection,
 };
 
+// Per-tool predicates that catch "tool returned successfully but the field is
+// undefined / false / [] for every entry" — the bug shape we hit repeatedly
+// before this harness existed (nas_users_list otp_enabled, nas_shares_list
+// encryption, nas_packages_list is_system / status, etc.). Return null on pass,
+// a short reason on fail. Run via `npm run verify -- --strict` to exit non-zero
+// on any failure.
+const ASSERTIONS: Record<string, (out: any) => string | null> = {
+  nas_status: (o) => {
+    if (typeof o.uptime_seconds !== "number") return "uptime_seconds not numeric";
+    if (!o.dsm_version) return "dsm_version missing";
+    if (!o.model) return "model missing";
+    return null;
+  },
+  nas_storage_health: (o) => {
+    if (!Array.isArray(o.volumes) || o.volumes.length === 0) return "no volumes";
+    if (!Array.isArray(o.drives) || o.drives.length === 0) return "no drives";
+    if (!o.volumes.every((v: any) => typeof v.size_total === "number"))
+      return "volume size_total not numeric";
+    return null;
+  },
+  nas_shares_list: (o) => {
+    if (!Array.isArray(o.shares) || o.shares.length === 0) return "no shares";
+    if (!o.shares.some((s: any) => typeof s.recycle_bin === "boolean"))
+      return "no share has populated recycle_bin (additional[] not unpacked?)";
+    if (!o.shares.some((s: any) => typeof s.encryption === "number"))
+      return "no share has populated encryption";
+    return null;
+  },
+  nas_packages_list: (o) => {
+    if (!Array.isArray(o.packages) || o.packages.length === 0) return "no packages";
+    if (!o.packages.some((p: any) => p.additional?.is_system === true))
+      return "no system packages detected (install_type='system' check broken)";
+    if (!o.packages.some((p: any) => p.status === "running"))
+      return "no running packages (additional.status not unpacked?)";
+    return null;
+  },
+  nas_packages_check_updates: (o) => {
+    if (!Array.isArray(o.pending)) return "pending not an array";
+    return null;
+  },
+  nas_users_list: (o) => {
+    if (!Array.isArray(o.users) || o.users.length === 0) return "no users";
+    if (!o.users.some((u: any) => typeof u.otp_enabled === "boolean"))
+      return "otp_enabled never populated (additional[] response shape wrong?)";
+    if (!o.users.some((u: any) => typeof u.email === "string"))
+      return "email never populated";
+    return null;
+  },
+  nas_firewall_list: (o) => {
+    if (typeof o.firewall_enabled !== "boolean") return "firewall_enabled not bool";
+    if (!Array.isArray(o.profiles)) return "profiles not array";
+    if (!Array.isArray(o.dos_protection)) return "dos_protection not array";
+    if (!Array.isArray(o.auto_block_allow_list)) return "auto_block_allow_list not array";
+    if (!Array.isArray(o.auto_block_deny_list)) return "auto_block_deny_list not array";
+    return null;
+  },
+  nas_dsm_security_settings: (o) => {
+    if (typeof o.web_hardening?.https_redirect !== "boolean")
+      return "web_hardening.https_redirect not bool";
+    if (typeof o.web_hardening?.hsts !== "boolean") return "web_hardening.hsts not bool";
+    if (typeof o.tls_profile?.default_level !== "number")
+      return "tls_profile.default_level not number";
+    if (typeof o.smb?.enabled !== "boolean") return "smb.enabled not bool";
+    if (typeof o.nfs?.enabled !== "boolean") return "nfs.enabled not bool";
+    if (!o.password_policy?.strong_password) return "password_policy.strong_password missing";
+    if (typeof o.active_insight?.monitoring_service !== "boolean")
+      return "active_insight.monitoring_service not bool";
+    return null;
+  },
+  nas_security_advisor_scan: (o) => {
+    if (!o.findings) return "no findings";
+    for (const sev of ["critical", "warning", "info", "safe"]) {
+      if (!Array.isArray(o.findings[sev])) return `findings.${sev} not array`;
+    }
+    return null;
+  },
+  nas_external_access: (o) => {
+    if (typeof o.quick_connect?.enabled !== "boolean")
+      return "quick_connect.enabled not bool";
+    if (!Array.isArray(o.ddns_records)) return "ddns_records not array";
+    if (!Array.isArray(o.app_portal)) return "app_portal not array";
+    return null;
+  },
+  nas_notifications: (o) => {
+    if (o.mail === null) return null; // legitimate absence
+    if (typeof o.mail?.enabled !== "boolean") return "mail.enabled not bool";
+    if (typeof o.mail?.recipients_count !== "number")
+      return "mail.recipients_count not number";
+    return null;
+  },
+  nas_certificates: (o) => {
+    if (!Array.isArray(o.certificates) || o.certificates.length === 0)
+      return "no certificates";
+    if (!o.certificates.every((c: any) => typeof c.days_until_expiry === "number"))
+      return "days_until_expiry not numeric on all certs";
+    return null;
+  },
+  nas_data_protection: (o) => {
+    if (typeof o.hyper_backup?.installed !== "boolean")
+      return "hyper_backup.installed not bool";
+    if (typeof o.snapshot_replication?.installed !== "boolean")
+      return "snapshot_replication.installed not bool";
+    return null;
+  },
+};
+
 async function main() {
   const cfg = loadConfig();
   if (!cfg.tlsRejectUnauthorized) {
@@ -50,9 +156,12 @@ async function main() {
   }
   const dsm = new DsmClient(cfg);
 
-  const filter = process.argv[2];
+  const args = process.argv.slice(2);
+  const strict = args.includes("--strict");
+  const filter = args.find((a) => !a.startsWith("--"));
   const names = filter ? [filter] : Object.keys(SUITE);
 
+  let failures = 0;
   for (const name of names) {
     const fn = SUITE[name];
     if (!fn) {
@@ -63,9 +172,24 @@ async function main() {
     try {
       const out = await fn(dsm);
       console.log(JSON.stringify(out, null, 2));
+      const check = ASSERTIONS[name];
+      if (check) {
+        const reason = check(out);
+        if (reason) {
+          console.error(`  ✗ ASSERT FAIL: ${reason}`);
+          failures++;
+        } else {
+          console.error(`  ✓ assertions passed`);
+        }
+      }
     } catch (err) {
-      console.error(`FAIL: ${err instanceof Error ? err.message : err}`);
+      console.error(`  ✗ FAIL: ${err instanceof Error ? err.message : err}`);
+      failures++;
     }
+  }
+  if (strict && failures > 0) {
+    console.error(`\n${failures} assertion(s) failed; exiting non-zero (--strict)`);
+    process.exit(1);
   }
 }
 

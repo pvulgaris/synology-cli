@@ -613,36 +613,118 @@ export async function nasPackageInstall(
   return { before, after, verified: ok };
 }
 
-/** Stop a running package via SYNO.Core.Package.Control. Idempotent — DSM
- *  returns success for already-stopped packages. POST is required (GET
- *  fails). DSM frequently drops the TCP connection mid-execution when
- *  stopping a package whose services were active; the stop still completes
- *  server-side, so we treat "fetch failed" as a soft signal and confirm via
- *  a follow-up status poll. */
-async function stopPackage(dsm: DsmClient, packageId: string): Promise<void> {
+/** SYNO.Core.Package.Control wrapper. Idempotent: DSM returns success for
+ *  already-stopped/started packages. POST is required (GET fails). DSM may
+ *  drop the TCP connection mid-execution on state changes; we treat
+ *  network-level errors as soft and confirm via a follow-up status poll
+ *  against the target predicate.
+ *
+ *  Methods: start | stop | restart (restart implemented client-side as
+ *  stop-then-start because DSM's `restart` method isn't reliably exposed). */
+async function controlPackage(
+  dsm: DsmClient,
+  packageId: string,
+  method: "start" | "stop",
+  desired: (status: string | undefined) => boolean
+): Promise<void> {
   try {
     await dsm.call({
       api: "SYNO.Core.Package.Control",
-      method: "stop",
+      method,
       version: 1,
       post: true,
       params: { id: packageId },
     });
   } catch (err: any) {
     const msg = String(err?.message ?? err);
-    // Network-level failures (fetch failed, ECONNRESET, etc.) — likely DSM
-    // dropped the connection mid-stop. Don't bail; verify via poll below.
     const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
     if (!isNetwork) throw err;
-    console.error(`[packages] stop ${packageId}: connection dropped — verifying via poll`);
+    console.error(
+      `[packages] ${method} ${packageId}: connection dropped — verifying via poll`
+    );
   }
-  // Poll for status to flip from "running"; tolerate up to 30s.
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const s = await listOneState(dsm, packageId);
-    if (!s || s.status !== "running") return;
+    if (!s) return; // package gone (e.g. uninstalled mid-call)
+    if (desired(s.status)) return;
     await sleep(1000);
   }
+  throw new Error(
+    `${method} ${packageId} timed out after 30s waiting for status to flip`
+  );
+}
+
+async function stopPackage(dsm: DsmClient, packageId: string): Promise<void> {
+  return controlPackage(dsm, packageId, "stop", (s) => s !== "running");
+}
+
+async function startPackage(dsm: DsmClient, packageId: string): Promise<void> {
+  return controlPackage(dsm, packageId, "start", (s) => s === "running");
+}
+
+export async function nasPackageControl(
+  cfg: Config,
+  dsm: DsmClient,
+  args: { name: string; action: "start" | "stop" | "restart" }
+) {
+  refuseIfProtected(args.name);
+  const before = await listOneState(dsm, args.name);
+  if (!before) {
+    throw new Error(
+      `Package "${args.name}" is not installed; nothing to ${args.action}.`
+    );
+  }
+
+  let after: any = null;
+  let ok = false;
+  let error: string | undefined;
+
+  try {
+    if (args.action === "stop") {
+      if (before.status !== "running") {
+        // No-op; record as ok for idempotency.
+        after = before;
+        ok = true;
+      } else {
+        await stopPackage(dsm, args.name);
+        after = await listOneState(dsm, args.name);
+        ok = after?.status !== "running";
+      }
+    } else if (args.action === "start") {
+      if (before.status === "running") {
+        after = before;
+        ok = true;
+      } else {
+        await startPackage(dsm, args.name);
+        after = await listOneState(dsm, args.name);
+        ok = after?.status === "running";
+      }
+    } else {
+      // restart = stop then start, regardless of initial state
+      if (before.status === "running") await stopPackage(dsm, args.name);
+      await startPackage(dsm, args.name);
+      after = await listOneState(dsm, args.name);
+      ok = after?.status === "running";
+    }
+    if (!ok) {
+      error = `Post-state mismatch: action=${args.action} expected running=${args.action !== "stop"}, got status=${after?.status ?? "<gone>"}`;
+    }
+  } catch (err: any) {
+    error = String(err?.message ?? err);
+    throw err;
+  } finally {
+    await recordWrite(cfg, {
+      tool: "nas_package_control",
+      args: { ...args },
+      before,
+      after,
+      ok,
+      error,
+    });
+  }
+
+  return { before, after, verified: ok };
 }
 
 export async function nasPackageUninstall(

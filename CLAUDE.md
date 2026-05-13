@@ -4,7 +4,7 @@ Onboarding for a future Claude session (or any human collaborator). What's here 
 
 ## What this is, in a paragraph
 
-A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (packages, security audit, shares, storage health) so an AI agent can manage the NAS. It deploys as a Docker container *on the NAS itself* (Container Manager → Project), bound to the Tailscale interface, with bearer-token + Origin auth on the HTTP endpoint. Auth to DSM is a dedicated `claude-mcp` user (`administrators` group, 2FA TOTP, no shared-folder access), credentials read at boot from 1Password via the `op` CLI. Claude Code talks to it natively over HTTP; Claude Desktop (which only accepts stdio MCP entries) talks to it via a thin stdio→HTTP bridge running locally on the user's Mac.
+A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (packages, security audit, shares, storage health, users, firewall, DSM hardening, external access, notifications, certificates, data protection) so an AI agent can manage the NAS. It deploys as a Docker container *on the NAS itself* (Container Manager → Project), bound to the Tailscale interface, with bearer-token + Origin auth on the HTTP endpoint. Auth to DSM is a dedicated `claude-mcp` user (`administrators` group, 2FA TOTP, no shared-folder access), credentials read at boot from 1Password via the `op` CLI. Claude Code talks to it natively over HTTP; Claude Desktop (which only accepts stdio MCP entries) talks to it via a thin stdio→HTTP bridge running locally on the user's Mac.
 
 ```
    Claude Desktop ──┐                                      ┌── NAS ─────────────────┐
@@ -73,6 +73,16 @@ After completion, `Installation.delete path=<tmp>` cleans up the staged .spk (be
 
 **Uninstall** is a single call: `SYNO.Core.Package.Uninstallation.uninstall` with `id` and `dsm_apps=""`. The `dsm_apps` field is a list of linked DSM apps to remove together, NOT a "keep data" flag.
 
+## DSM API quirks (the consolidated cheatsheet)
+
+A live reference of error codes, response shapes, and known API names is at `~/.claude/projects/-redacted-/memory/project_synology_dsm_api_cheatsheet.md` — read it before adding new tools or debugging unexpected `code:` errors. Highlights:
+
+- Error 114 = "Lost parameters" (NOT "API key mismatch"). 5100 = "Unable to perform" (NOT empty list).
+- `requestFormat: "JSON"` in `SYNO.API.Info` describes the **response**, not the request — always send form-encoded.
+- `additional[]` response keys are FLAT on User/Share objects but NESTED under `additional` on Package objects.
+- Per-adapter calls (DoS, GeoIP) use `configs=[{adapter: ifname}, ...]` as a JSON-stringified single form field.
+- State-changing POSTs (e.g., `Package.Control.stop`) frequently drop the TCP connection mid-execution while completing server-side — catch network-level errors and verify via status poll.
+
 ## Hard-won lessons, in roughly the order we learned them
 
 These are gotchas that aren't obvious from the code. Each one was a real bug we hit.
@@ -123,9 +133,9 @@ a local config file has a `protect:` list of packages the user doesn't want offe
 
 `mcp_bearer_token` in 1Password is the single source of truth. Rotation = generate new value → update 1Password → restart container → update `claude_desktop_config.json`'s `MCP_BRIDGE_TOKEN` on every Mac that points here → restart Claude clients.
 
-### TLS verification is per-DSM-call, not process-wide
+### TLS verification is process-wide via `NODE_TLS_REJECT_UNAUTHORIZED=0`
 
-`DsmClient` uses a custom `https.Agent` with `rejectUnauthorized` controlled by `cfg.tlsRejectUnauthorized` (default: false to accept DSM's self-signed cert). Other outbound HTTPS (e.g., if you ever add a webhook) uses Node's normal TLS verification. Don't reintroduce the process-wide `NODE_TLS_REJECT_UNAUTHORIZED=0` — it'll silently downgrade unrelated calls.
+v0.2.12 tried a per-fetch `undici` Agent for scoped TLS skip; it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" + silently-empty responses on some endpoints). v0.2.14 reverted to process-wide skip via the `NODE_TLS_REJECT_UNAUTHORIZED=0` env var set at startup when `cfg.tlsRejectUnauthorized` is false. The blast radius is bounded: the daemon only talks to DSM at `cfg.dsmBaseUrl`; there are no other outbound HTTPS calls. If you add one, route it explicitly through a verifying agent or restore the per-fetch scoping.
 
 ### No `synology-api` npm dep on purpose
 
@@ -142,7 +152,7 @@ These are conscious omissions, not gaps. If a future request actually requires o
 - Firewall rule edits, 2FA enforcement changes, SMB protocol toggles — out of scope; surface as findings only.
 - DSM self-update — would brick the connection mid-call.
 - Btrfs snapshot helper — users can snapshot via DSM UI if they want pre-mutation insurance.
-- Cert inventory, recent-logins, SecAdvisor history — none mapped to a stated user request.
+- Recent-logins, SecAdvisor history — none mapped to a stated user request.
 - An `nas_audit_log` read tool — JSONL is on disk; reading it is a file-system op, not an MCP one.
 - Transitive dependency installs. `nas_package_install` surfaces missing deps with a clear error and asks the user to install each one. Auto-recursion is too much blast radius for a write tool.
 - Cold-storage installs. We pass `install_on_cold_storage` from the catalog through to `Installation.check`; if a user hits a package whose catalog flag forces cold-storage and DSM refuses, they fall back to the UI.

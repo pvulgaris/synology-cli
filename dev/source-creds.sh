@@ -15,10 +15,19 @@
 
 export DSM_OP_VAULT DSM_OP_ITEM DSM_BASE_URL DSM_USER
 
-# Default AUDIT_LOG_DIR is /volume1/... (NAS path); replace for local dev so
-# the harness doesn't ENOENT trying to mkdir /volume1.
+# Local AUDIT_LOG_DIR fallback — only used if MCP_AUDIT_URL is unset. The
+# canonical audit log lives on the NAS via the daemon's POST /audit endpoint;
+# this fallback is for unconfigured dev shells (or daemon offline) so writes
+# don't crash trying to mkdir /volume1.
 : "${AUDIT_LOG_DIR:=$HOME/.cache/synology-nas-mcp/audit}"
 export AUDIT_LOG_DIR
+
+# Route every audit record written from dev tsx through the deployed daemon so
+# the NAS-side log stays the single source of truth. The daemon validates the
+# bearer (already in $MCP_BEARER_TOKEN from the creds cache) and appends to
+# /audit (bind-mounted to /volume1/docker/synology-nas-mcp/audit/).
+: "${MCP_AUDIT_URL:=http://nas.local:8765/audit}"
+export MCP_AUDIT_URL
 
 # Persist DSM SID across npx tsx invocations so we don't burn a TOTP code on
 # every run (DSM 7.3 rejects TOTP reuse within the 30s window with code 404).

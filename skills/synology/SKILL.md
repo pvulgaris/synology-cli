@@ -105,4 +105,35 @@ Every write is logged to `/volume1/docker/synology-nas-mcp/audit/YYYY-MM.jsonl` 
 
 - **Package update from a Synology notification email**: search Gmail for the notification → cross-reference with `nas_packages_check_updates` → render per-package summary → confirm one at a time → `nas_package_update` (verifies post-state internally) → archive the email when all confirmed updates succeed.
 - **Security audit**: fan out reads in parallel, group findings by severity, present DSM-UI fix paths (never auto-remediate).
-- **Cleanup**: list packages, bucket as active / dormant / candidate (system + protected packages never appear as candidates), present dormant + candidate list with reasoning, confirm one at a time.
+- **Cleanup**: list packages, bucket as active / dormant / candidate (system + protected packages never appear as candidates), present dormant + candidate list with reasoning, confirm one at a time. **Only packages with `additional.install_type !== "system"` are user-removable** — the DSM UI hides the uninstall button on system-marked packages even if they appear in Package Center.
+
+## Audit finding IDs
+
+When composing security-audit output, attach a stable `id: synology.<category>.<short_name>` to each finding so the user can diff across runs and you can track which findings are still open. Use these when they apply; coin new ones in the same pattern as needed.
+
+| ID | Trigger |
+|---|---|
+| `synology.firewall.disabled` | `nas_firewall_list.firewall_enabled === false` |
+| `synology.firewall.dos_off_on_adapter` | one entry per adapter with `dos_protect_enable === false` (include adapter name) |
+| `synology.dsm.https_redirect_off` | `web_hardening.https_redirect === false` |
+| `synology.dsm.hsts_off` | `web_hardening.hsts === false` |
+| `synology.dsm.tls_profile_downgraded` | any service `current-level < default-level` (include service name) |
+| `synology.dsm.default_dsm_ports` | `web_hardening.http_port === 5000` or `https_port === 5001` |
+| `synology.smb.smb1_enabled` | `smb.min_protocol === 1` |
+| `synology.ssh.enabled` | `ssh_enabled === true` (mostly an observation; flag if Tailscale ACL isn't tight) |
+| `synology.users.admin_active` | user `admin` not in expired state |
+| `synology.users.guest_active` | user `guest` not in expired state |
+| `synology.users.no_2fa` | per-user finding when `otp_enabled === false` on a non-disabled account |
+| `synology.notifications.no_recipients` | `notifications.mail.recipients_count === 0` while `mail.enabled === true` |
+| `synology.notifications.smtp_verify_cert_off` | `mail.verify_cert === false` |
+| `synology.data_protection.no_backups` | `hyper_backup.installed === false` |
+| `synology.data_protection.no_snapshots` | `snapshot_replication.installed === false` |
+| `synology.shares.no_encryption` | per-share when `encryption === 0` and share holds user data |
+| `synology.shares.no_recycle_bin` | per-share when `recycle_bin === false` on a user-data share |
+| `synology.cert.expiring_soon` | per-cert when `days_until_expiry < 30` |
+| `synology.external.quickconnect_relay_on` | `quick_connect.enabled === false` AND `relay_enabled === true` (half-configured) |
+| `synology.password.weak_policy` | min_length < 12, no special_char requirement, history_num === 0, etc. |
+| `synology.privacy.active_insight_on` | `active_insight.monitoring_service === true` (observation only) |
+| `synology.packages.outdated` | `nas_packages_check_updates.pending` non-empty |
+
+The point isn't exhaustive coverage — it's stable IDs for the load-bearing findings. New checks coin new IDs in the same pattern (`synology.<category>.<short_name>`).

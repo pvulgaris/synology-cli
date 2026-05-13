@@ -21,6 +21,7 @@ import {
   nasPackageInstall,
   nasPackageUninstall,
   nasPackageUpdate,
+  nasPackageControl,
 } from "./tools/packages.js";
 import {
   nasSecurityAdvisorScan,
@@ -193,6 +194,18 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
     "Update an installed package to the latest version. Runs the DSM UI's actual upgrade sequence (feasibility_check → get_queue → Installation.check → Installation.upgrade with operation=\"upgrade\"). Refuses DSM/kernel. Refuses if package is already current. Mutating — confirm with user before calling. Verifies post-state by polling Package.list for the version flip.",
     { name: z.string().describe("Package id to update") },
     safeTool((args) => nasPackageUpdate(cfg, dsm, args))
+  );
+
+  server.tool(
+    "nas_package_control",
+    "Start, stop, or restart an installed package via SYNO.Core.Package.Control. Idempotent for already-in-target-state. Mutating — confirm with user before calling. DSM may drop the TCP connection mid-execution; the tool tolerates network-level errors and verifies via a follow-up Package.list status poll.",
+    {
+      name: z.string().describe("Package id (e.g. 'PlexMediaServer')"),
+      action: z
+        .enum(["start", "stop", "restart"])
+        .describe("Lifecycle action to apply"),
+    },
+    safeTool((args) => nasPackageControl(cfg, dsm, args))
   );
 
   return server;
