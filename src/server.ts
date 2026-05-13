@@ -33,7 +33,6 @@ import { nasSharesList } from "./tools/shares.js";
 import { nasExternalAccess } from "./tools/external.js";
 import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
-import { nasDataProtection } from "./tools/data_protection.js";
 
 function jsonContent(data: unknown) {
   return {
@@ -71,107 +70,100 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_status",
-    "DSM/system status: model, DSM version, uptime, temperature, CPU/memory load. Cheap first call to confirm the NAS is reachable and the session is alive.",
+    "DSM system status: model, version, uptime, temperature, CPU/memory load.",
     {},
     safeTool(() => nasStatus(dsm))
   );
 
   server.tool(
     "nas_storage_health",
-    "Volumes (status, used/free, RAID level) + drives (S.M.A.R.T. status, temp, model). Use for drive-health checks and Time-Machine quota planning.",
+    "Volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model).",
     {},
     safeTool(() => nasStorageHealth(dsm))
   );
 
   server.tool(
     "nas_packages_list",
-    "All installed packages with versions, running state, and is_system flag. The is_system flag distinguishes core DSM packages from user-installable ones.",
+    "Installed packages with versions, running state, and is_system flag.",
     {},
     safeTool(() => nasPackagesList(dsm))
   );
 
   server.tool(
     "nas_packages_check_updates",
-    "Packages with pending updates available from the official Synology repo. DSM itself is intentionally excluded — managing DSM updates is out of scope; apply those via DSM UI.",
+    "Packages with pending updates from the Synology repo (excludes DSM self-update).",
     {},
     safeTool(() => nasPackagesCheckUpdates(dsm))
   );
 
   server.tool(
     "nas_package_info",
-    "Metadata for a single package (publisher, description, changelog, dependencies, size).",
+    "Metadata for one package: publisher, description, changelog, dependencies, size.",
     { name: z.string().describe("Package id, e.g. 'HyperBackup'") },
     safeTool((args) => nasPackageInfo(dsm, args))
   );
 
   server.tool(
     "nas_security_advisor_scan",
-    "Run DSM Security Advisor (synchronous from the caller's POV; polls until the async scan finishes). Returns findings grouped by severity (critical/warning/info/safe).",
+    "Run DSM Security Advisor; returns findings grouped by severity. Polls until the async scan finishes.",
     {},
     safeTool(() => nasSecurityAdvisorScan(dsm))
   );
 
   server.tool(
     "nas_users_list",
-    "DSM user accounts: name, uid, 2FA on/off, expired flag, password-change restrictions, description, email.",
+    "DSM user accounts: name, uid, 2FA state, expired flag, email.",
     {},
     safeTool(() => nasUsersList(dsm))
   );
 
   server.tool(
     "nas_firewall_list",
-    "Firewall profiles, auto-block (failed-login lockout), and DoS protection settings.",
+    "Firewall profiles, auto-block (failed-login lockout), and per-adapter DoS protection.",
     {},
     safeTool(() => nasFirewallList(dsm))
   );
 
   server.tool(
     "nas_dsm_security_settings",
-    "DSM hardening posture: web (HTTPS-redirect, HSTS, ports, CSRF/CSP, session timeout), per-service TLS profile, SSH/Telnet on-off, SMB protocol min/max + encryption, NFS on-off, DSM auto-update mode, password policy, Active Insight telemetry toggle. Use for the 'is my NAS configured safely?' question.",
+    "DSM hardening posture: web/TLS, SSH/Telnet, SMB, NFS, auto-update, password policy, telemetry.",
     {},
     safeTool(() => nasDsmSecuritySettings(dsm))
   );
 
   server.tool(
     "nas_shares_list",
-    "Shared folders with encryption, quota (used/total MB), recycle-bin, snapshot support, BTRFS COW flag. DSM 7's share API does not expose an explicit Time Machine flag — identify TM shares by name. Time-Machine *backup state* (last successful, in-progress) lives in `tmutil` on the Mac being backed up, not here.",
+    "Shared folders with encryption, quota (used/total MB), recycle-bin, snapshot support, BTRFS COW flag.",
     {},
     safeTool(() => nasSharesList(dsm))
   );
 
   server.tool(
     "nas_external_access",
-    "What's reachable from outside the LAN: QuickConnect (master toggle + relay flag + alias), DDNS records, Application Portal apps (per-app HTTPS-redirect), Reverse Proxy entries, UPnP-driven port-forwarding rules. Empty everywhere = NAS not internet-facing.",
+    "External-facing posture: QuickConnect, DDNS, App Portal, reverse proxy, port forwarding.",
     {},
     safeTool(() => nasExternalAccess(dsm))
   );
 
   server.tool(
     "nas_notifications",
-    "Notification posture: SMTP mail config (server, port, SSL, verify-cert, sender, recipient count). Empty recipient list = SMTP wired but no human hears alerts.",
+    "SMTP notification config: server, port, SSL, verify-cert, sender, recipient count.",
     {},
     safeTool(() => nasNotifications(dsm))
   );
 
   server.tool(
     "nas_certificates",
-    "DSM certificate inventory with derived `days_until_expiry` per cert. Flag any cert with days_until_expiry < 30.",
+    "DSM certificates with derived `days_until_expiry` per cert.",
     {},
     safeTool(() => nasCertificates(dsm))
-  );
-
-  server.tool(
-    "nas_data_protection",
-    "Backup + snapshot posture: Hyper Backup tasks (destination, encryption flag, last status) + Snapshot Replication state. Reports `installed: false` per service if the corresponding package isn't installed — that itself is a finding for ransomware mitigation.",
-    {},
-    safeTool(() => nasDataProtection(dsm))
   );
 
   // ── Write tools — client surfaces to user; server logs every call ─────────
 
   server.tool(
     "nas_package_install",
-    "Install a package from the official Synology repo. Runs the DSM UI's single-call install sequence (feasibility_check → get_queue → Installation.check → Installation.install with operation=\"install\"). Refuses DSM/kernel. Refuses if already installed (use nas_package_update). Mutating — confirm with user before calling. Verifies post-state by polling Package.list for the version flip.",
+    "Install a package from the Synology repo. Mutating — confirm with user. Refuses DSM/kernel and already-installed packages. Verifies post-state.",
     {
       name: z.string().describe("Package id to install (e.g. 'TextEditor')"),
       version: z
@@ -184,21 +176,21 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_package_uninstall",
-    "Uninstall an installed package. Data linked to the package may be removed by DSM — confirm with user before calling. Refuses DSM/kernel. Verifies post-state.",
+    "Uninstall a package. Mutating — confirm with user. DSM may remove linked data. Refuses DSM/kernel. Verifies post-state.",
     { name: z.string().describe("Package id to uninstall") },
     safeTool((args) => nasPackageUninstall(cfg, dsm, args))
   );
 
   server.tool(
     "nas_package_update",
-    "Update an installed package to the latest version. Runs the DSM UI's actual upgrade sequence (feasibility_check → get_queue → Installation.check → Installation.upgrade with operation=\"upgrade\"). Refuses DSM/kernel. Refuses if package is already current. Mutating — confirm with user before calling. Verifies post-state by polling Package.list for the version flip.",
+    "Update a package to the latest version. Mutating — confirm with user. Refuses DSM/kernel and already-current packages. Verifies post-state.",
     { name: z.string().describe("Package id to update") },
     safeTool((args) => nasPackageUpdate(cfg, dsm, args))
   );
 
   server.tool(
     "nas_package_control",
-    "Start, stop, or restart an installed package via SYNO.Core.Package.Control. Idempotent for already-in-target-state. Mutating — confirm with user before calling. DSM may drop the TCP connection mid-execution; the tool tolerates network-level errors and verifies via a follow-up Package.list status poll.",
+    "Start/stop/restart a package. Mutating — confirm with user. Idempotent. Tolerates DSM's mid-execution connection drops; verifies via status poll.",
     {
       name: z.string().describe("Package id (e.g. 'PlexMediaServer')"),
       action: z

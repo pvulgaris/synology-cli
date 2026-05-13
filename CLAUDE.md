@@ -141,10 +141,6 @@ v0.2.12 tried a per-fetch `undici` Agent for scoped TLS skip; it interacted badl
 
 There are several `synology-*` npm packages. None covered SYNO.Core.Package, SYNO.SecurityAdvisor.*, and SYNO.Core.Share with the field-level options we need. Rolling our own thin client (~200 lines in `dsm.ts`) was cleaner than wrapping a community lib for partial coverage. Don't add a dep here unless one of them grows into mature coverage.
 
-### Time Machine state lives on the Mac
-
-The NAS only stores the SMB share config + quota. Backup *state* (last successful, in-progress, errors) is in macOS's `tmutil` on the Mac being backed up. The skill's `SKILL.md` tells Claude to shell out via Bash when running on that Mac; don't try to add an MCP tool for backup state — it would have to SSH to the Mac, which adds a whole separate auth surface we don't want.
-
 ## Deliberately deferred (don't pre-build)
 
 These are conscious omissions, not gaps. If a future request actually requires one, add it then.

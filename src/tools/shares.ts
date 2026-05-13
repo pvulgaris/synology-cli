@@ -6,10 +6,6 @@
  * `enable_recycle_bin` (not `recyclebin`) on the read side even though the
  * request additional[] key is `recyclebin`. Quota lives in `quota_value` /
  * `share_quota_used`, both in MB.
- *
- * Time Machine flag is NOT on this API in DSM 7 — TM folder selection lives
- * under a separate File Services endpoint and would need its own tool. Users
- * can identify TM shares by naming convention until then.
  */
 
 import type { DsmClient } from "../dsm.js";

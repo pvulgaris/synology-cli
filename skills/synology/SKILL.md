@@ -1,6 +1,6 @@
 ---
 name: synology
-description: Manage a Synology NAS (DSM 7) — packages, security audit, shares — via the synology-nas-mcp server. Use when the user asks about NAS status, package updates / research / installation / removal, security posture, or Time Machine share configuration.
+description: Manage a Synology NAS (DSM 7) — packages, security audit, shares — via the synology-nas-mcp server. Use when the user asks about NAS status, package updates / research / installation / removal, or security posture.
 ---
 
 # Synology NAS
@@ -12,8 +12,7 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 - **Status + storage**: "is the NAS okay?", "drive health", "RAID state".
 - **Packages**: list installed, check for updates, get info, install, update, uninstall.
 - **Package research**: "what's a good package for X?", "should I install Y?" — compose with WebSearch + `nas_packages_list` (to avoid recommending what's already there).
-- **Security audit**: "audit security", "is my NAS configured safely?" — compose Security Advisor scan + users + firewall + DSM settings + shares + storage + external access + notifications + certificates + data protection.
-- **Time Machine inspection**: NAS-side share config + quota. For Mac-side backup *state*, see below.
+- **Security audit**: "audit security", "is my NAS configured safely?" — compose Security Advisor scan + users + firewall + DSM settings + shares + storage + external access + notifications + certificates.
 
 ## Tool inventory
 
@@ -34,7 +33,6 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 | `nas_external_access` | QuickConnect, DDNS, App Portal HTTPS-per-app, reverse-proxy rules, port forwarding |
 | `nas_notifications` | SMTP mail config — server, ssl, verify-cert, sender, recipient count |
 | `nas_certificates` | Cert inventory with `days_until_expiry`, services, self-signed flag |
-| `nas_data_protection` | Hyper Backup tasks (with encryption flag) + Snapshot Replication state; both report `installed: false` if package missing |
 
 **Write tools (per-call user confirmation required, see Write flow below):**
 
@@ -84,18 +82,6 @@ First-time-only gotcha: if Package Center API calls return weird errors on a fre
 
 The user maintains a `protect:` list of packages that must never be offered for uninstall, even if they look dormant. Load the list at the start of any cleanup workflow from whatever path the user has configured for this skill's policy file; never offer protected packages.
 
-## Mac-side Time Machine state
-
-The NAS knows the *share configuration*. The actual *backup state* (last successful, in-progress, errors) lives in `tmutil` on the Mac being backed up. When the user asks about Time Machine, do both:
-
-- NAS side: `nas_shares_list` → locate the Time Machine share by name (DSM 7's share API doesn't expose an explicit TM flag) → report `quota_mb`, `quota_used_mb`, `encryption`.
-- Mac side (if running locally on the Mac being backed up): shell out via Bash to
-  - `tmutil destinationinfo` (confirms which destination is configured)
-  - `tmutil status` (in-progress, errors)
-  - `tmutil latestbackup` (timestamp of last successful backup)
-
-If you're invoked from a context without local Bash to the backing-up Mac (e.g., a dispatched session on a different host), report NAS-side only and tell the user why.
-
 ## Audit log
 
 Every write is logged to `/volume1/docker/synology-nas-mcp/audit/YYYY-MM.jsonl` on the NAS, with timestamp, tool, args, before/after state, ok flag, and error message if any. Surface this path when the user asks "what did Claude do?" — they can read it themselves.
@@ -126,8 +112,6 @@ When composing security-audit output, attach a stable `id: synology.<category>.<
 | `synology.users.no_2fa` | per-user finding when `otp_enabled === false` on a non-disabled account |
 | `synology.notifications.no_recipients` | `notifications.mail.recipients_count === 0` while `mail.enabled === true` |
 | `synology.notifications.smtp_verify_cert_off` | `mail.verify_cert === false` |
-| `synology.data_protection.no_backups` | `hyper_backup.installed === false` |
-| `synology.data_protection.no_snapshots` | `snapshot_replication.installed === false` |
 | `synology.shares.no_encryption` | per-share when `encryption === 0` and share holds user data |
 | `synology.shares.no_recycle_bin` | per-share when `recycle_bin === false` on a user-data share |
 | `synology.cert.expiring_soon` | per-cert when `days_until_expiry < 30` |
