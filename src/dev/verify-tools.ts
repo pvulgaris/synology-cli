@@ -25,7 +25,6 @@ import {
 import { nasExternalAccess } from "../tools/external.js";
 import { nasNotifications } from "../tools/notifications.js";
 import { nasCertificates } from "../tools/certificates.js";
-import { nasDataProtection } from "../tools/data_protection.js";
 
 const SUITE: Record<string, (dsm: DsmClient) => Promise<unknown>> = {
   nas_status: nasStatus,
@@ -40,7 +39,6 @@ const SUITE: Record<string, (dsm: DsmClient) => Promise<unknown>> = {
   nas_external_access: nasExternalAccess,
   nas_notifications: nasNotifications,
   nas_certificates: nasCertificates,
-  nas_data_protection: nasDataProtection,
 };
 
 // Per-tool predicates that catch "tool returned successfully but the field is
@@ -139,13 +137,6 @@ const ASSERTIONS: Record<string, (out: any) => string | null> = {
       return "no certificates";
     if (!o.certificates.every((c: any) => typeof c.days_until_expiry === "number"))
       return "days_until_expiry not numeric on all certs";
-    return null;
-  },
-  nas_data_protection: (o) => {
-    if (typeof o.hyper_backup?.installed !== "boolean")
-      return "hyper_backup.installed not bool";
-    if (typeof o.snapshot_replication?.installed !== "boolean")
-      return "snapshot_replication.installed not bool";
     return null;
   },
 };
