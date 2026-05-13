@@ -82,10 +82,10 @@ Use Container Manager's **Project** feature, not Container. Project mode reads
 
 ### One-time setup
 
-1. Build the image locally on your Mac (cross-build to linux/amd64 since the DS224+ is x86_64):
+1. Build the image locally on your Mac (cross-build to linux/amd64 for x86_64 Synology models; use `linux/arm64` on ARM models):
 
    ```sh
-   cd ~/Dropbox/Code/synology-nas-mcp
+   cd <repo>
    docker build --platform linux/amd64 -t synology-nas-mcp:latest .
    docker save synology-nas-mcp:latest -o ~/Downloads/synology-nas-mcp-latest.tar
    ```
@@ -152,7 +152,7 @@ From a tailnet device not in the ACL allowlist, same curl times out at the ACL l
 Claude Desktop currently only accepts stdio MCP entries, not HTTP. Install the package's `bridge` subcommand globally on your Mac — it's a 39-line stdio→HTTP proxy that lives at `/opt/homebrew/bin/synology-nas-mcp`.
 
 ```sh
-cd ~/Dropbox/Code/synology-nas-mcp
+cd <repo>
 npm install -g .
 ```
 

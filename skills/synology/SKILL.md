@@ -80,9 +80,9 @@ First-time-only gotcha: if Package Center API calls return weird errors on a fre
 
 **DSM API gotcha** — `SYNO.API.Info`'s `requestFormat:"JSON"` describes the *response*, not the request. Every working DSM endpoint expects form-encoded params (GET querystring or POST `application/x-www-form-urlencoded`) regardless of what API.Info says. Array-typed params like `configs=[{"adapter":"eth0"}, ...]` go as a single form field whose value is the JSON-stringified array.
 
-## Protected packages (local config)
+## Protected packages (per-user policy)
 
-a local config file has a `protect:` list. Never offer those for uninstall, even if they look dormant. Read the file at the start of any cleanup workflow.
+The user maintains a `protect:` list of packages that must never be offered for uninstall, even if they look dormant. Load the list at the start of any cleanup workflow from whatever path the user has configured for this skill's policy file; never offer protected packages.
 
 ## Mac-side Time Machine state
 

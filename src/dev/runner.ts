@@ -5,7 +5,7 @@
  * package-upgrade flow against nas.local:5001 over Tailscale.
  *
  *   DSM_BASE_URL=https://nas.local:5001 \
- *   DSM_OP_VAULT=Claude DSM_OP_ITEM='Synology DSM' \
+ *   DSM_OP_VAULT=your-1password-vault DSM_OP_ITEM='Synology DSM' \
  *   DEBUG_DSM_RESPONSES=1 \
  *   npx tsx src/dev/runner.ts <subcommand> [args]
  *

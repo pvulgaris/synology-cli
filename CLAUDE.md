@@ -38,7 +38,7 @@ A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (pa
 
 ```sh
 # On the Mac (Colima or Docker Desktop running for cross-arch builds):
-cd ~/Dropbox/Code/synology-nas-mcp
+cd <repo>
 docker build --platform linux/amd64 \
   -t synology-nas-mcp:<ver> -t synology-nas-mcp:latest .
 docker save synology-nas-mcp:<ver> synology-nas-mcp:latest \
@@ -125,9 +125,9 @@ It returns the entire catalog of packages installable on this DS — 105+ items,
 
 `HARD_REFUSE_NAMES = new Set(["DSM", "kernel"])`. If you find yourself wanting to add a refusal at the server-registration layer, push it down into the tool function so the JSONL audit log captures the rejected attempt with full args. Server-registration refusals are silent from the audit's perspective.
 
-### `protect:` list is skill-layer policy, not server-enforced
+### `protect:` policy is skill-layer, not server-enforced
 
-a local config file has a `protect:` list of packages the user doesn't want offered for uninstall (HyperBackup, ContainerManager, Tailscale, etc.). The MCP server doesn't read this file — refusal happens in the skill prompt (Claude's role) before it calls `nas_package_uninstall`. Server-side hard refusals are only `DSM` and `kernel`.
+The skill prompt (see `skills/synology/SKILL.md`) loads a per-user policy file naming packages the user doesn't want offered for uninstall (e.g. HyperBackup, ContainerManager, Tailscale). The MCP server doesn't read this file — refusal happens in the calling skill before it ever invokes `nas_package_uninstall`. Server-side hard refusals are only `DSM` and `kernel`. The location and format of the policy file are the user's choice; the skill consumes whatever path they configure.
 
 ### Bearer rotation
 
