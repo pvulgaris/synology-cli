@@ -130,6 +130,10 @@ It returns the entire catalog of packages installable on this DS — 105+ items,
 
 `HARD_REFUSE_NAMES = new Set(["DSM", "kernel"])`. If you find yourself wanting to add a refusal at the server-registration layer, push it down into the tool function so the JSONL audit log captures the rejected attempt with full args. Server-registration refusals are silent from the audit's perspective.
 
+### Zod schemas live only in `server.ts`; tool files declare their own arg types
+
+`server.ts` is the MCP boundary — that's where input validation happens via `z.object({...})` per tool. Tool functions in `tools/*.ts` declare their `args` parameter with a hand-written TS type (`{name: string; action: "start" | "stop" | "restart"}`) instead of `z.infer<typeof schema>`. The drift risk is real (rename a field in one, forget the other), but the alternative is worse: deriving the tool's arg type from the schema would force every tool file to import zod, which expands the import graph and bleeds the boundary into the rest of the codebase. The current layering keeps zod confined to where it does its job and lets tool files stay zod-free. If drift becomes a recurring bug source, revisit — but premature unification adds a dependency constraint that's harder to undo than to add.
+
 ### `protect:` policy is skill-layer, not server-enforced
 
 The skill prompt (see `skills/synology/SKILL.md`) loads a per-user policy file naming packages the user doesn't want offered for uninstall (e.g. HyperBackup, ContainerManager, Tailscale). The MCP server doesn't read this file — refusal happens in the calling skill before it ever invokes `nas_package_uninstall`. Server-side hard refusals are only `DSM` and `kernel`. The location and format of the policy file are the user's choice; the skill consumes whatever path they configure.
@@ -140,7 +144,7 @@ The skill prompt (see `skills/synology/SKILL.md`) loads a per-user policy file n
 
 ### TLS verification is process-wide via `NODE_TLS_REJECT_UNAUTHORIZED=0`
 
-v0.2.12 tried a per-fetch `undici` Agent for scoped TLS skip; it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" + silently-empty responses on some endpoints). v0.2.14 reverted to process-wide skip via the `NODE_TLS_REJECT_UNAUTHORIZED=0` env var set at startup when `cfg.tlsRejectUnauthorized` is false. The blast radius is bounded: the daemon only talks to DSM at `cfg.dsmBaseUrl`; there are no other outbound HTTPS calls. If you add one, route it explicitly through a verifying agent or restore the per-fetch scoping.
+v0.2.12 tried a per-fetch `undici` Agent for scoped TLS skip; it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" + silently-empty responses on some endpoints). v0.2.14 reverted to process-wide skip via the `NODE_TLS_REJECT_UNAUTHORIZED=0` env var set at startup when `cfg.tlsSkipVerify` is true. The blast radius is bounded: the daemon only talks to DSM at `cfg.dsmBaseUrl`; there are no other outbound HTTPS calls. If you add one, route it explicitly through a verifying agent or restore the per-fetch scoping.
 
 ### No `synology-api` npm dep on purpose
 
