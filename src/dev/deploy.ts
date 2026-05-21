@@ -97,12 +97,12 @@ async function loginForDeploy(
 }
 
 /** Build curl args common to every deploy call: silent + optional TLS skip.
- *  `-k` is gated on `cfg.tlsRejectUnauthorized` so dev shells trusting DSM's
+ *  `-k` is gated on `cfg.tlsSkipVerify` so dev shells trusting DSM's
  *  self-signed cert (the default) still work, while a future caller that
  *  imports a real cert into the system trust store gets verification. */
 function curlBase(cfg: Config): string[] {
   const args = ["-s"];
-  if (!cfg.tlsRejectUnauthorized) args.push("-k");
+  if (cfg.tlsSkipVerify) args.push("-k");
   return args;
 }
 

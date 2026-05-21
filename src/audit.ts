@@ -27,6 +27,16 @@ export interface AuditRecord {
   error?: string;
 }
 
+async function writeRecordToFile(
+  cfg: Config,
+  rec: AuditRecord
+): Promise<void> {
+  const month = rec.ts.slice(0, 7); // YYYY-MM
+  const file = path.join(cfg.auditLogDir, `${month}.jsonl`);
+  await fs.mkdir(cfg.auditLogDir, { recursive: true, mode: 0o700 });
+  await fs.appendFile(file, JSON.stringify(rec) + "\n", { mode: 0o600 });
+}
+
 export async function recordWrite(
   cfg: Config,
   rec: Omit<AuditRecord, "ts">
@@ -60,10 +70,7 @@ export async function recordWrite(
     // rsync the local file into the NAS audit dir to reunify the timeline.
   }
 
-  const month = ts.slice(0, 7); // YYYY-MM
-  const file = path.join(cfg.auditLogDir, `${month}.jsonl`);
-  await fs.mkdir(cfg.auditLogDir, { recursive: true, mode: 0o700 });
-  await fs.appendFile(file, JSON.stringify(full) + "\n", { mode: 0o600 });
+  await writeRecordToFile(cfg, full);
 }
 
 /** Server-side write path: append a pre-built AuditRecord (already includes
@@ -72,8 +79,5 @@ export async function appendAuditRecord(
   cfg: Config,
   rec: AuditRecord
 ): Promise<void> {
-  const month = rec.ts.slice(0, 7);
-  const file = path.join(cfg.auditLogDir, `${month}.jsonl`);
-  await fs.mkdir(cfg.auditLogDir, { recursive: true, mode: 0o700 });
-  await fs.appendFile(file, JSON.stringify(rec) + "\n", { mode: 0o600 });
+  await writeRecordToFile(cfg, rec);
 }

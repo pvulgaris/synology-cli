@@ -24,7 +24,10 @@ export interface Config {
   mcpBindPort: number;
   allowedOrigins: Set<string>;
   auditLogDir: string;
-  tlsRejectUnauthorized: boolean;
+  /** When true, skip TLS cert verification — DSM ships with a self-signed cert
+   *  out of the box, so this defaults true. Driven by the env var
+   *  TLS_REJECT_UNAUTHORIZED ("0" → skip, anything else → enforce). */
+  tlsSkipVerify: boolean;
 }
 
 function required(name: string): string {
@@ -60,6 +63,6 @@ export function loadConfig(): Config {
       "AUDIT_LOG_DIR",
       "/volume1/docker/synology-nas-mcp/audit"
     ),
-    tlsRejectUnauthorized: optional("TLS_REJECT_UNAUTHORIZED", "0") !== "0",
+    tlsSkipVerify: optional("TLS_REJECT_UNAUTHORIZED", "0") === "0",
   };
 }

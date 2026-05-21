@@ -65,14 +65,10 @@ function sleep(ms: number): Promise<void> {
 
 // ──────────── Reads ────────────
 
-// DSM 7's Package.list response nests `status` AND `is_system_ish` info under
-// `additional`, not at the top level. Previous versions of this tool read
-// `p.status` and `p.is_system_package` — both fields don't exist, so every
-// package came back with status=undefined and is_system=false. Real signal:
-//   - status: `additional.status` ("running" / "stop" / etc.)
-//   - is_system: `additional.install_type === "system"` (DSM-bundled, can't
-//     be uninstalled via Package Center even if it appears in the UI)
-//   - startable: `additional.startable` (can be stopped via Package.Control)
+// On DSM 7's Package.list, `status` and install-type info nest under
+// `additional`, not top-level (see docs/dsm-api-quirks.md). `is_system` is
+// derived from `additional.install_type === "system"` — those packages are
+// DSM-bundled and can't be uninstalled via Package Center.
 export async function nasPackagesList(dsm: DsmClient) {
   const data = await dsm.call({
     api: "SYNO.Core.Package",
@@ -335,41 +331,50 @@ async function installationCheck(
   return { volumePath: typeof vp === "string" ? vp : "" };
 }
 
-const installationCheckUpgrade = (dsm: DsmClient, c: CatalogEntry) =>
-  installationCheck(dsm, c, true);
-const installationCheckInstall = (dsm: DsmClient, c: CatalogEntry) =>
-  installationCheck(dsm, c, false);
-
-/** Phase 1 of upgrade: kick off the .spk download. Returns a sentinel taskid
- *  of the form `@SYNOPKG_DOWNLOAD_<id>` that subsequent status/Download.check
- *  calls key off. The response's `progress:1` is misleading — it refers to
- *  the queue-accept, not the file transfer. Use Installation.status's
- *  `finished:true` to know the .spk is on disk. */
-async function startDownload(
+/** Start the .spk download (upgrade) or fresh install. Both flows hit
+ *  Installation.{upgrade,install} with near-identical params — only the
+ *  method, the `operation` enum, and a trailing `volume_path` (install only)
+ *  differ. Returns the sentinel taskid (`@SYNOPKG_DOWNLOAD_<id>` for upgrade).
+ *
+ *  The response's `progress:1` is misleading — it refers to the queue-accept,
+ *  not the file transfer. Use Installation.status's `finished:true` to know
+ *  the .spk is on disk.
+ *
+ *  The install path is NOT HAR-verified to the same level as upgrade (we only
+ *  captured an upgrade), but the symmetric assumption is the same DSM Package
+ *  Center JS code path; the prior multi-step "download then install with path"
+ *  shape failed the same way our pre-v0.2.11 upgrade did. */
+async function startInstallation(
   dsm: DsmClient,
-  catalog: CatalogEntry
+  catalog: CatalogEntry,
+  mode: "upgrade" | "install",
+  volumePath?: string
 ): Promise<string> {
+  const params: Record<string, string | number | boolean> = {
+    name: JSON.stringify(catalog.id),
+    is_syno: catalog.source === "syno",
+    beta: catalog.beta,
+    url: JSON.stringify(catalog.link),
+    checksum: JSON.stringify(catalog.md5),
+    filesize: catalog.size,
+    type: 0,
+    blqinst: false,
+    operation: JSON.stringify(mode),
+  };
+  if (mode === "install" && volumePath) {
+    params.volume_path = JSON.stringify(volumePath);
+  }
   const res = await dsm.call<any>({
     api: "SYNO.Core.Package.Installation",
-    method: "upgrade",
+    method: mode === "upgrade" ? "upgrade" : "install",
     version: 1,
     post: true,
-    params: {
-      name: JSON.stringify(catalog.id),
-      is_syno: catalog.source === "syno",
-      beta: catalog.beta,
-      url: JSON.stringify(catalog.link),
-      checksum: JSON.stringify(catalog.md5),
-      filesize: catalog.size,
-      type: 0,
-      blqinst: false,
-      operation: JSON.stringify("upgrade"),
-    },
+    params,
   });
   const taskId = (res as any)?.taskid;
   if (typeof taskId !== "string" || taskId.length === 0) {
     throw new Error(
-      `Installation.upgrade (download phase) did not return a taskid; got: ${JSON.stringify(res)}`
+      `Installation.${mode} did not return a taskid; got: ${JSON.stringify(res)}`
     );
   }
   return taskId;
@@ -489,6 +494,52 @@ async function waitForVersionFlip(
   );
 }
 
+/** Install-flow completion poller. Same Package.list version-flip signal as
+ *  upgrade, plus a per-tick Installation.status check whose only job is to
+ *  catch `success === false` early — otherwise a doomed install would sit on
+ *  the 15-min timeout instead of failing in seconds. The install method
+ *  isn't HAR-verified at the same level as upgrade, so we keep this
+ *  defense-in-depth signal here even though CLAUDE.md notes status is
+ *  unreliable for *completion* detection. Package.list is sampled at a
+ *  slower cadence than status — version-flip is rare during install but
+ *  the response carries every installed package's `additional[]` payload. */
+async function waitForInstall(
+  dsm: DsmClient,
+  taskId: string,
+  packageId: string,
+  targetVersion: string
+): Promise<any> {
+  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+  let nextListCheck = 0;
+  let lastStatus = "";
+  while (Date.now() < deadline) {
+    const s = await dsm.call<any>({
+      api: "SYNO.Core.Package.Installation",
+      method: "status",
+      version: 1,
+      post: true,
+      params: { task_id: taskId },
+    });
+    if ((s as any)?.success === false) {
+      throw new Error(`Install failed mid-flight: ${JSON.stringify(s)}`);
+    }
+    const status = String((s as any)?.status ?? "");
+    if (status !== lastStatus) {
+      console.error(`[packages] install ${taskId} status=${status}`);
+      lastStatus = status;
+    }
+    if (Date.now() >= nextListCheck) {
+      const live = await listOneState(dsm, packageId);
+      if (live?.version === targetVersion) return live;
+      nextListCheck = Date.now() + DOWNLOAD_POLL_MS * 3;
+    }
+    await sleep(DOWNLOAD_POLL_MS);
+  }
+  throw new Error(
+    `Install timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package not yet showing in Package.list`
+  );
+}
+
 /** Cleanup the .spk file DSM staged into /volume1/@tmp/synopkg/. The DSM UI
  *  does this last; best-effort here (we don't fail the whole upgrade if it
  *  4xx's). */
@@ -516,13 +567,15 @@ export async function nasPackageUpdate(
   args: { name: string }
 ) {
   refuseIfProtected(args.name);
-  const before = await listOneState(dsm, args.name);
+  const [before, catalog] = await Promise.all([
+    listOneState(dsm, args.name),
+    findInCatalog(dsm, args.name),
+  ]);
   if (!before) {
     throw new Error(
       `Package "${args.name}" is not installed. Use nas_package_install for fresh installs.`
     );
   }
-  const catalog = await findInCatalog(dsm, args.name);
   if (catalog.version === before.version) {
     throw new Error(
       `Package "${args.name}" is already at the latest version (${before.version}); no update available.`
@@ -539,8 +592,8 @@ export async function nasPackageUpdate(
     // Match the DSM UI's exact sequence (re-verified from HAR 2026-05-20).
     await feasibilityCheck(dsm, catalog.id);
     await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
-    await installationCheckUpgrade(dsm, catalog);
-    taskId = await startDownload(dsm, catalog);
+    await installationCheck(dsm, catalog, true);
+    taskId = await startInstallation(dsm, catalog, "upgrade");
     downloadedPath = await waitForDownloadAndGetPath(dsm, taskId);
     await applyDownloadedUpgrade(dsm, catalog, downloadedPath);
     after = await waitForVersionFlip(dsm, catalog.id, catalog.version);
@@ -571,98 +624,21 @@ export async function nasPackageUpdate(
   return { before, after, verified: ok };
 }
 
-/** Fresh-install equivalent of `startUpgrade` — same single-call orchestration
- *  shape DSM's UI uses, with `method=install` + `operation="install"`. NOT
- *  HAR-verified for install yet (we only captured an upgrade), but the
- *  symmetric assumption is the same DSM Package Center JS code path; the
- *  prior multi-step "download then install with path" implementation was
- *  the wrong shape — same failure mode as our pre-v0.2.11 upgrade. */
-async function startInstall(
-  dsm: DsmClient,
-  catalog: CatalogEntry,
-  volumePath: string
-): Promise<string> {
-  const res = await dsm.call<any>({
-    api: "SYNO.Core.Package.Installation",
-    method: "install",
-    version: 1,
-    post: true,
-    params: {
-      name: JSON.stringify(catalog.id),
-      is_syno: catalog.source === "syno",
-      beta: catalog.beta,
-      url: JSON.stringify(catalog.link),
-      checksum: JSON.stringify(catalog.md5),
-      filesize: catalog.size,
-      type: 0,
-      blqinst: false,
-      operation: JSON.stringify("install"),
-      volume_path: JSON.stringify(volumePath),
-    },
-  });
-  const taskId = (res as any)?.taskid;
-  if (typeof taskId !== "string" || taskId.length === 0) {
-    throw new Error(
-      `Installation.install did not return a taskid; got: ${JSON.stringify(res)}`
-    );
-  }
-  return taskId;
-}
-
-/** Same predicate-poll as upgrade — version flip on Package.list is the
- *  definitive completion signal for install too. */
-async function waitForInstall(
-  dsm: DsmClient,
-  taskId: string,
-  packageId: string,
-  targetVersion: string
-): Promise<any> {
-  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
-  let lastProgress = -1;
-  let lastStatus = "";
-  while (Date.now() < deadline) {
-    const s = await dsm.call<any>({
-      api: "SYNO.Core.Package.Installation",
-      method: "status",
-      version: 1,
-      post: true,
-      params: { task_id: taskId },
-    });
-    const progress = Number((s as any)?.progress ?? 0);
-    const status = String((s as any)?.status ?? "");
-    if (progress !== lastProgress || status !== lastStatus) {
-      console.error(
-        `[packages] install ${taskId} progress=${(progress * 100).toFixed(1)}% status=${status}`
-      );
-      lastProgress = progress;
-      lastStatus = status;
-    }
-    if ((s as any)?.success === false) {
-      throw new Error(`Install failed mid-flight: ${JSON.stringify(s)}`);
-    }
-    const live = await listOneState(dsm, packageId);
-    if (live?.version === targetVersion) return live;
-    await sleep(DOWNLOAD_POLL_MS);
-  }
-  throw new Error(
-    `Install timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package not yet showing in Package.list`
-  );
-}
-
 export async function nasPackageInstall(
   cfg: Config,
   dsm: DsmClient,
   args: { name: string; version?: string }
 ) {
   refuseIfProtected(args.name);
-  const before = await listOneState(dsm, args.name);
+  const [before, catalog] = await Promise.all([
+    listOneState(dsm, args.name),
+    findInCatalog(dsm, args.name),
+  ]);
   if (before) {
     throw new Error(
       `Package "${args.name}" is already installed (version ${before.version}). Use nas_package_update to upgrade.`
     );
   }
-
-  const catalog = await findInCatalog(dsm, args.name);
 
   let after: any = null;
   let ok = false;
@@ -675,9 +651,9 @@ export async function nasPackageInstall(
     // single-call install. blupgrade=false here vs upgrade flow's =true.
     await feasibilityCheck(dsm, catalog.id);
     await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
-    const checked = await installationCheckInstall(dsm, catalog);
+    const checked = await installationCheck(dsm, catalog, false);
     volumePath = checked.volumePath;
-    taskId = await startInstall(dsm, catalog, volumePath);
+    taskId = await startInstallation(dsm, catalog, "install", volumePath);
     after = await waitForInstall(dsm, taskId, catalog.id, catalog.version);
     // Install path is not HAR-verified to the same level as upgrade; we
     // best-effort resolve the staged .spk path so cleanupUpgradeTmp can
@@ -723,10 +699,7 @@ export async function nasPackageInstall(
  *  already-stopped/started packages. POST is required (GET fails). DSM may
  *  drop the TCP connection mid-execution on state changes; we treat
  *  network-level errors as soft and confirm via a follow-up status poll
- *  against the target predicate.
- *
- *  Methods: start | stop | restart (restart implemented client-side as
- *  stop-then-start because DSM's `restart` method isn't reliably exposed). */
+ *  against the target predicate. */
 async function controlPackage(
   dsm: DsmClient,
   packageId: string,
@@ -807,7 +780,9 @@ export async function nasPackageControl(
         ok = after?.status === "running";
       }
     } else {
-      // restart = stop then start, regardless of initial state
+      // Restart implemented client-side as stop-then-start; DSM's native
+      // `Package.Control.restart` method isn't reliably exposed across DSM
+      // versions, so we drive it from primitives.
       if (before.status === "running") await stopPackage(dsm, args.name);
       await startPackage(dsm, args.name);
       after = await listOneState(dsm, args.name);

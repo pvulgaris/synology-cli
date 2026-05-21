@@ -67,7 +67,7 @@ function parseRawArgs(args: string[]): {
 
 async function main() {
   const cfg = loadConfig();
-  if (!cfg.tlsRejectUnauthorized) {
+  if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const dsm = new DsmClient(cfg);
