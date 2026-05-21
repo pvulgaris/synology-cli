@@ -27,6 +27,45 @@ export interface AuditRecord {
   error?: string;
 }
 
+/** Run a write tool's body with a guaranteed audit log entry on both success
+ *  and failure. `ctx` is a mutable bag the body can add partial-state fields
+ *  to (task ids, intermediate paths) so the audit captures them even when the
+ *  body throws halfway through. Returns the body's `{after, ok}` so the
+ *  caller can construct its tool-specific response shape. */
+export async function withAudit(
+  cfg: Config,
+  opts: {
+    tool: string;
+    args: Record<string, unknown>;
+    before: unknown;
+  },
+  fn: (ctx: Record<string, unknown>) => Promise<{
+    after: unknown;
+    ok: boolean;
+    error?: string;
+  }>
+): Promise<{ after: unknown; ok: boolean }> {
+  const ctx: Record<string, unknown> = {};
+  let result: { after: unknown; ok: boolean; error?: string } | undefined;
+  let thrownError: string | undefined;
+  try {
+    result = await fn(ctx);
+    return { after: result.after, ok: result.ok };
+  } catch (err: any) {
+    thrownError = String(err?.message ?? err);
+    throw err;
+  } finally {
+    await recordWrite(cfg, {
+      tool: opts.tool,
+      args: { ...opts.args, ...ctx },
+      before: opts.before,
+      after: result?.after ?? null,
+      ok: result?.ok ?? false,
+      error: result?.error ?? thrownError,
+    });
+  }
+}
+
 async function writeRecordToFile(
   cfg: Config,
   rec: AuditRecord

@@ -42,7 +42,7 @@
 
 import type { Config } from "../config.js";
 import type { DsmClient } from "../dsm.js";
-import { recordWrite } from "../audit.js";
+import { withAudit } from "../audit.js";
 
 const HARD_REFUSE_NAMES = new Set(["DSM", "kernel"]);
 
@@ -582,44 +582,31 @@ export async function nasPackageUpdate(
     );
   }
 
-  let after: any = null;
-  let ok = false;
-  let error: string | undefined;
-  let taskId: string | undefined;
-  let downloadedPath: string | undefined;
-
-  try {
-    // Match the DSM UI's exact sequence (re-verified from HAR 2026-05-20).
-    await feasibilityCheck(dsm, catalog.id);
-    await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
-    await installationCheck(dsm, catalog, true);
-    taskId = await startInstallation(dsm, catalog, "upgrade");
-    downloadedPath = await waitForDownloadAndGetPath(dsm, taskId);
-    await applyDownloadedUpgrade(dsm, catalog, downloadedPath);
-    after = await waitForVersionFlip(dsm, catalog.id, catalog.version);
-    await cleanupUpgradeTmp(dsm, downloadedPath);
-    ok = after?.version === catalog.version;
-    if (!ok) {
-      error = `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`;
+  const { after, ok } = await withAudit(
+    cfg,
+    { tool: "nas_package_update", args: { ...args, target_version: catalog.version }, before },
+    async (ctx) => {
+      // Match the DSM UI's exact sequence (re-verified from HAR 2026-05-20).
+      await feasibilityCheck(dsm, catalog.id);
+      await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
+      await installationCheck(dsm, catalog, true);
+      const taskId = await startInstallation(dsm, catalog, "upgrade");
+      ctx.task_id = taskId;
+      const downloadedPath = await waitForDownloadAndGetPath(dsm, taskId);
+      ctx.downloaded_path = downloadedPath;
+      await applyDownloadedUpgrade(dsm, catalog, downloadedPath);
+      const after = await waitForVersionFlip(dsm, catalog.id, catalog.version);
+      await cleanupUpgradeTmp(dsm, downloadedPath);
+      const ok = after?.version === catalog.version;
+      return {
+        after,
+        ok,
+        error: ok
+          ? undefined
+          : `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`,
+      };
     }
-  } catch (err: any) {
-    error = String(err?.message ?? err);
-    throw err;
-  } finally {
-    await recordWrite(cfg, {
-      tool: "nas_package_update",
-      args: {
-        ...args,
-        target_version: catalog.version,
-        task_id: taskId,
-        downloaded_path: downloadedPath,
-      },
-      before,
-      after,
-      ok,
-      error,
-    });
-  }
+  );
 
   return { before, after, verified: ok };
 }
@@ -640,57 +627,48 @@ export async function nasPackageInstall(
     );
   }
 
-  let after: any = null;
-  let ok = false;
-  let error: string | undefined;
-  let volumePath: string | undefined;
-  let taskId: string | undefined;
-
-  try {
-    // Mirror the verified DSM UI sequence — preflight, queue, check, then the
-    // single-call install. blupgrade=false here vs upgrade flow's =true.
-    await feasibilityCheck(dsm, catalog.id);
-    await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
-    const checked = await installationCheck(dsm, catalog, false);
-    volumePath = checked.volumePath;
-    taskId = await startInstallation(dsm, catalog, "install", volumePath);
-    after = await waitForInstall(dsm, taskId, catalog.id, catalog.version);
-    // Install path is not HAR-verified to the same level as upgrade; we
-    // best-effort resolve the staged .spk path so cleanupUpgradeTmp can
-    // delete it. If Download.check returns nothing, skip — leftover .spk
-    // doesn't hurt anything.
-    try {
-      const dl = await dsm.call<any>({
-        api: "SYNO.Core.Package.Installation.Download",
-        method: "check",
-        version: 1,
-        post: true,
-        params: { taskid: taskId },
-      });
-      const path = (dl as any)?.filename;
-      if (typeof path === "string" && path.length > 0) {
-        await cleanupUpgradeTmp(dsm, path);
+  const { after, ok } = await withAudit(
+    cfg,
+    { tool: "nas_package_install", args: { ...args, target_version: catalog.version }, before },
+    async (ctx) => {
+      // Mirror the verified DSM UI sequence — preflight, queue, check, then the
+      // single-call install. blupgrade=false here vs upgrade flow's =true.
+      await feasibilityCheck(dsm, catalog.id);
+      await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
+      const checked = await installationCheck(dsm, catalog, false);
+      ctx.volume_path = checked.volumePath;
+      const taskId = await startInstallation(dsm, catalog, "install", checked.volumePath);
+      ctx.task_id = taskId;
+      const after = await waitForInstall(dsm, taskId, catalog.id, catalog.version);
+      // Install path is not HAR-verified to the same level as upgrade; we
+      // best-effort resolve the staged .spk path so cleanupUpgradeTmp can
+      // delete it. If Download.check returns nothing, skip — leftover .spk
+      // doesn't hurt anything.
+      try {
+        const dl = await dsm.call<any>({
+          api: "SYNO.Core.Package.Installation.Download",
+          method: "check",
+          version: 1,
+          post: true,
+          params: { taskid: taskId },
+        });
+        const path = (dl as any)?.filename;
+        if (typeof path === "string" && path.length > 0) {
+          await cleanupUpgradeTmp(dsm, path);
+        }
+      } catch {
+        // best-effort
       }
-    } catch {
-      // best-effort
+      const ok = after?.version === catalog.version;
+      return {
+        after,
+        ok,
+        error: ok
+          ? undefined
+          : `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`,
+      };
     }
-    ok = after?.version === catalog.version;
-    if (!ok) {
-      error = `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`;
-    }
-  } catch (err: any) {
-    error = String(err?.message ?? err);
-    throw err;
-  } finally {
-    await recordWrite(cfg, {
-      tool: "nas_package_install",
-      args: { ...args, target_version: catalog.version, volume_path: volumePath, task_id: taskId },
-      before,
-      after,
-      ok,
-      error,
-    });
-  }
+  );
 
   return { before, after, verified: ok };
 }
@@ -755,55 +733,49 @@ export async function nasPackageControl(
     );
   }
 
-  let after: any = null;
-  let ok = false;
-  let error: string | undefined;
-
-  try {
-    if (args.action === "stop") {
-      if (before.status !== "running") {
-        // No-op; record as ok for idempotency.
-        after = before;
-        ok = true;
+  const { after, ok } = await withAudit(
+    cfg,
+    { tool: "nas_package_control", args, before },
+    async () => {
+      let after: any;
+      let ok: boolean;
+      if (args.action === "stop") {
+        if (before.status !== "running") {
+          // No-op; record as ok for idempotency.
+          after = before;
+          ok = true;
+        } else {
+          await stopPackage(dsm, args.name);
+          after = await listOneState(dsm, args.name);
+          ok = after?.status !== "running";
+        }
+      } else if (args.action === "start") {
+        if (before.status === "running") {
+          after = before;
+          ok = true;
+        } else {
+          await startPackage(dsm, args.name);
+          after = await listOneState(dsm, args.name);
+          ok = after?.status === "running";
+        }
       } else {
-        await stopPackage(dsm, args.name);
-        after = await listOneState(dsm, args.name);
-        ok = after?.status !== "running";
-      }
-    } else if (args.action === "start") {
-      if (before.status === "running") {
-        after = before;
-        ok = true;
-      } else {
+        // Restart implemented client-side as stop-then-start; DSM's native
+        // `Package.Control.restart` method isn't reliably exposed across DSM
+        // versions, so we drive it from primitives.
+        if (before.status === "running") await stopPackage(dsm, args.name);
         await startPackage(dsm, args.name);
         after = await listOneState(dsm, args.name);
         ok = after?.status === "running";
       }
-    } else {
-      // Restart implemented client-side as stop-then-start; DSM's native
-      // `Package.Control.restart` method isn't reliably exposed across DSM
-      // versions, so we drive it from primitives.
-      if (before.status === "running") await stopPackage(dsm, args.name);
-      await startPackage(dsm, args.name);
-      after = await listOneState(dsm, args.name);
-      ok = after?.status === "running";
+      return {
+        after,
+        ok,
+        error: ok
+          ? undefined
+          : `Post-state mismatch: action=${args.action} expected running=${args.action !== "stop"}, got status=${after?.status ?? "<gone>"}`,
+      };
     }
-    if (!ok) {
-      error = `Post-state mismatch: action=${args.action} expected running=${args.action !== "stop"}, got status=${after?.status ?? "<gone>"}`;
-    }
-  } catch (err: any) {
-    error = String(err?.message ?? err);
-    throw err;
-  } finally {
-    await recordWrite(cfg, {
-      tool: "nas_package_control",
-      args: { ...args },
-      before,
-      after,
-      ok,
-      error,
-    });
-  }
+  );
 
   return { before, after, verified: ok };
 }
@@ -819,44 +791,37 @@ export async function nasPackageUninstall(
     throw new Error(`Package "${args.name}" is not installed; nothing to uninstall.`);
   }
 
-  let after: any = null;
-  let ok = false;
-  let error: string | undefined;
   let stopped = false;
-
-  try {
-    // Stop the package first if it's running. DSM's Uninstallation handler
-    // can stop in-flight, but explicit stop-then-uninstall is the safer
-    // sequence (matches the DSM UI behaviour exactly).
-    if (before.status === "running") {
-      await stopPackage(dsm, args.name);
-      stopped = true;
+  const { after, ok } = await withAudit(
+    cfg,
+    { tool: "nas_package_uninstall", args, before },
+    async (ctx) => {
+      // Stop the package first if it's running. DSM's Uninstallation handler
+      // can stop in-flight, but explicit stop-then-uninstall is the safer
+      // sequence (matches the DSM UI behaviour exactly).
+      if (before.status === "running") {
+        await stopPackage(dsm, args.name);
+        stopped = true;
+      }
+      ctx.stopped = stopped;
+      await dsm.call({
+        api: "SYNO.Core.Package.Uninstallation",
+        method: "uninstall",
+        version: 1,
+        post: true,
+        params: { id: args.name, dsm_apps: "" },
+      });
+      const after = await waitForState(dsm, args.name, (s) => s == null);
+      const ok = after == null;
+      return {
+        after,
+        ok,
+        error: ok
+          ? undefined
+          : `Post-state: package "${args.name}" still installed after uninstall (version ${(after as any)?.version}).`,
+      };
     }
-    await dsm.call({
-      api: "SYNO.Core.Package.Uninstallation",
-      method: "uninstall",
-      version: 1,
-      post: true,
-      params: { id: args.name, dsm_apps: "" },
-    });
-    after = await waitForState(dsm, args.name, (s) => s == null);
-    ok = after == null;
-    if (!ok) {
-      error = `Post-state: package "${args.name}" still installed after uninstall (version ${after?.version}).`;
-    }
-  } catch (err: any) {
-    error = String(err?.message ?? err);
-    throw err;
-  } finally {
-    await recordWrite(cfg, {
-      tool: "nas_package_uninstall",
-      args: { ...args, stopped },
-      before,
-      after,
-      ok,
-      error,
-    });
-  }
+  );
 
   return { before, after, removed: ok, stopped };
 }
