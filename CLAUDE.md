@@ -57,17 +57,22 @@ Both reverse-engineered from a DevTools HAR capture.
 
 When bumping the version, only update `package.json` — `src/version.ts` reads it at startup and both `server.ts` and `http.ts` import the constant. The docker tag in the build command is just the human-facing label; nothing depends on it matching.
 
-## Write flow: install + update (single-call shape)
+## Write flow: update (two-phase, download then install-from-path)
 
-`src/tools/packages.ts:nasPackageInstall` and `:nasPackageUpdate` both run the same DSM-UI-equivalent sequence — reverse-engineered from a HAR capture on 2026-05-12. Five API calls:
+`src/tools/packages.ts:nasPackageUpdate` runs the DSM UI's exact sequence — re-verified from a HAR capture on 2026-05-20. The first `Installation.upgrade` only downloads the .spk; a **second** `Installation.upgrade` with `path` + `installrunpackage:true` is what actually installs. The v0.2.11–v0.2.25 implementation thought the first call did everything and silently failed on packages that don't auto-install post-download (HybridShare, FileStation — left orphaned .spks in `/volume1/@tmp/synopkg/download.*/`).
 
-1. **`SYNO.Core.Package.feasibility_check`** — preflight. `type="install_check"`, `packages=["<id>"]`. Returns `{success:true}`.
-2. **`SYNO.Core.Package.Installation.get_queue`** — queue planning. `pkgs=[{pkg, operation:"install", version, beta}]`. Returns `broken_pkgs`/`conflicted_pkgs`/etc.; bail early on non-empty.
-3. **`SYNO.Core.Package.Installation.check` (version=2)** — config preflight. Returns `volume_path` (system packages → `/usr/local/packages`; user packages → user-selected volume). `blupgrade=true` for update, `=false` for install.
-4. **`SYNO.Core.Package.Installation.{install|upgrade}`** — the one call that does it all. `operation="install"|"upgrade"`, `name`/`url`/`checksum`/`filesize`/`is_syno`/`beta` from the catalog. Returns `taskid="@SYNOPKG_DOWNLOAD_<id>"` immediately; the actual work runs async.
-5. **Poll `Installation.status` + `Package.list`** — the version flip on `Package.list` is the authoritative completion signal (status stays `"upgrading"` long after the swap). 15-min timeout.
+1. **`SYNO.Core.Package.feasibility_check`** — preflight.
+2. **`SYNO.Core.Package.Installation.get_queue`** — dep planning. Bail on `broken_pkgs`/`conflicted_pkgs`.
+3. **`SYNO.Core.Package.Installation.check` v=2** — `blupgrade=true`, `ver`/`size`/`id`. Returns `volume_path`.
+4. **`SYNO.Core.Package.Installation.upgrade` v=1** — DOWNLOAD. Params: `name`/`url`/`checksum`/`filesize`/`is_syno`/`beta`/`operation:"upgrade"`. Returns `taskid="@SYNOPKG_DOWNLOAD_<id>"`.
+5. **Poll `Installation.status`** until `finished:true` — .spk is on disk.
+6. **`SYNO.Core.Package.Installation.Download.check`** — returns `filename`, the staged .spk path.
+7. **`SYNO.Core.Package.Installation.check` v=2** — simpler shape: `id`/`install_type`/`install_on_cold_storage`/`blCheckDep:false`. No `ver`/`size`/`blupgrade`.
+8. **`SYNO.Core.Package.Installation.upgrade` v=1** — INSTALL FROM PATH. Params: `path`, `extra_values:"{}"`, `installrunpackage:true`, `force:true`, `check_codesign:true`, `type:0`. Throw on non-empty `worker_message`.
+9. **Poll `Package.list`** until `version` flips (`Installation.status` keeps reporting `"upgrading"` long after the actual swap, so it isn't reliable). 15-min timeout.
+10. **`Installation.delete path=<staged>`** — cleanup; best-effort.
 
-After completion, `Installation.delete path=<tmp>` cleans up the staged .spk (best-effort).
+`nasPackageInstall` still uses the older single-call `Installation.install` shape (NOT HAR-verified for fresh installs). If a fresh install ever shows the same "version never flipped" symptom, it likely needs the same two-phase split with `Installation.install` step 8 instead of `upgrade`.
 
 **Form-encoding gotcha.** DSM JSON-parses each form value. Strings must carry quotes on the wire (`name="FileStation"`), bools/numbers/null are literal, arrays/objects are JSON-stringified. The code uses `JSON.stringify(...)` for string values so they appear quoted in the form body.
 
