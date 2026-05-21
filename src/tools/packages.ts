@@ -1,40 +1,41 @@
 /**
  * Package Center tools — reads + write tools (install, uninstall, update).
  *
- * == Upgrade flow (the part that took multiple sessions to nail) ==
+ * == Upgrade flow (re-verified from a fresh HAR on 2026-05-20) ==
  *
- * The DSM UI's actual upgrade sequence — reverse-engineered from a captured
- * HAR file in v0.2.11 — is NOT what N4S4's docs describe. There is no
- * separate "download phase that yields a task_id" followed by an upgrade
- * call. The upgrade call IS the orchestration:
+ * The first `Installation.upgrade` call ONLY downloads the .spk. A second
+ * `Installation.upgrade` with `path` + `installrunpackage:true` is what
+ * actually applies the install. v0.2.11–v0.2.25 omitted that second call
+ * and silently failed on packages that don't auto-install post-download
+ * (HybridShare, FileStation — observed as 15-min "version never flipped"
+ * timeouts with the .spk left orphaned in /volume1/@tmp/synopkg/).
  *
- *   1. SYNO.Core.Package.feasibility_check   (preflight, returns {success:true})
- *   2. SYNO.Core.Package.Installation.get_queue
- *      → returns queue + any broken/conflicted/paused packages
- *   3. SYNO.Core.Package.Installation.check (version=2!)
- *      → returns volume_path for upgrades
- *   4. SYNO.Core.Package.Installation.upgrade  ← THIS is the call that does it.
- *      params include `operation="upgrade"`, `url`, `checksum`, `filesize`,
- *      `is_syno`, `beta` — all sourced from the catalog. NO `task_id`.
- *   5. Poll SYNO.Core.Package.Installation.status until finished
- *   6. SYNO.Core.Package.Installation.delete cleans up the tmp file (optional)
+ *   1. SYNO.Core.Package.feasibility_check          preflight
+ *   2. SYNO.Core.Package.Installation.get_queue     plan + dep check
+ *   3. SYNO.Core.Package.Installation.check v=2     preflight w/ ver+size+blupgrade
+ *   4. SYNO.Core.Package.Installation.upgrade v=1   DOWNLOAD (url/checksum/filesize)
+ *                                                   → returns taskid @SYNOPKG_DOWNLOAD_<id>
+ *   5. Poll Installation.status until finished:true → .spk on disk
+ *   6. SYNO.Core.Package.Installation.Download.check → filename = downloaded .spk path
+ *   7. SYNO.Core.Package.Installation.check v=2     simpler shape (id + install_type only)
+ *   8. SYNO.Core.Package.Installation.upgrade v=1   INSTALL FROM PATH
+ *                                                   (path, extra_values:"{}",
+ *                                                   installrunpackage:true,
+ *                                                   force:true, check_codesign:true)
+ *   9. Poll Package.list for the version flip       definitive completion signal
+ *  10. SYNO.Core.Package.Installation.delete        cleanup the .spk
  *
  * Param values are JSON-encoded in the form body (DSM JSON-parses each one):
  * strings carry quotes (`name="FileStation"`), bools/numbers/null are literal,
- * arrays/objects are JSON-stringified.
- *
- * Prior attempts that DID NOT work: single-call `upgrade?id=…`,
- * `upgrade(task_id=…)` after a separate Installation.install download,
- * SYNO.Entry.Request batch_request compounds, JSON-body POSTs, browser-
- * impersonation with SynoToken/Cookie. All returned `{success:true,
- * progress:1, taskid:"@SYNOPKG_DOWNLOAD_<name>"}` — but never applied the
- * upgrade. v0.2.10 shipped a HITL fallback; v0.2.11+ has the real flow.
+ * arrays/objects are JSON-stringified. `extra_values:"{}"` is a string carrying
+ * a JSON object literal — wire form has both layers of quoting.
  *
  * APIs used:
  *   SYNO.Core.Package                       v2  list installed; v1 feasibility_check
  *   SYNO.Core.Package.Server                v2  catalog (link/md5/size + flags)
  *   SYNO.Core.Package.Installation          v1  upgrade / status / delete
  *                                           v2  check (returns volume_path)
+ *   SYNO.Core.Package.Installation.Download v1  check (returns staged .spk path)
  *   SYNO.Core.Package.Installation.get_queue (on Installation, v1)
  *   SYNO.Core.Package.Uninstallation        v1  uninstall
  */
@@ -134,27 +135,40 @@ export async function nasPackagesCheckUpdates(dsm: DsmClient) {
   return { pending };
 }
 
+// DSM has no `SYNO.Core.Package.Server.get` method (returns code 103, "method
+// not found"), so we list the full catalog and filter. Same pattern as
+// `findInCatalog`; kept separate because the read tool surfaces different
+// fields (publisher/changelog/deps) and shouldn't share that helper's throw
+// shape.
 export async function nasPackageInfo(
   dsm: DsmClient,
   args: { name: string }
 ) {
-  const data = await dsm.call({
+  const data = await dsm.call<any>({
     api: "SYNO.Core.Package.Server",
-    method: "get",
+    method: "list",
     version: 2,
-    params: { id: args.name },
+    params: { tab: "all" },
   });
+  const pkg = (data?.packages ?? []).find(
+    (p: any) => p.id === args.name || p.name === args.name
+  );
+  if (!pkg) {
+    throw new Error(
+      `Package "${args.name}" not found in the Synology repo catalog for this DS.`
+    );
+  }
   return {
-    id: data?.id,
-    name: data?.name,
-    version: data?.version,
-    publisher: data?.publisher,
-    description: data?.description,
-    changelog: data?.changelog,
-    dependencies: data?.depend_packages,
-    install_dep_packages: data?.install_dep_packages,
-    size: data?.size,
-    beta: data?.beta,
+    id: pkg.id,
+    name: pkg.name,
+    version: pkg.version,
+    publisher: pkg.publisher,
+    description: pkg.description,
+    changelog: pkg.changelog,
+    dependencies: pkg.depend_packages,
+    install_dep_packages: pkg.install_dep_packages,
+    size: pkg.size,
+    beta: pkg.beta,
   };
 }
 
@@ -326,10 +340,12 @@ const installationCheckUpgrade = (dsm: DsmClient, c: CatalogEntry) =>
 const installationCheckInstall = (dsm: DsmClient, c: CatalogEntry) =>
   installationCheck(dsm, c, false);
 
-/** The actual upgrade call — same endpoint that triggers the download AND
- *  orchestrates the install. NO separate task_id is involved; this is the
- *  whole thing. */
-async function startUpgrade(
+/** Phase 1 of upgrade: kick off the .spk download. Returns a sentinel taskid
+ *  of the form `@SYNOPKG_DOWNLOAD_<id>` that subsequent status/Download.check
+ *  calls key off. The response's `progress:1` is misleading — it refers to
+ *  the queue-accept, not the file transfer. Use Installation.status's
+ *  `finished:true` to know the .spk is on disk. */
+async function startDownload(
   dsm: DsmClient,
   catalog: CatalogEntry
 ): Promise<string> {
@@ -353,24 +369,20 @@ async function startUpgrade(
   const taskId = (res as any)?.taskid;
   if (typeof taskId !== "string" || taskId.length === 0) {
     throw new Error(
-      `Installation.upgrade did not return a taskid; got: ${JSON.stringify(res)}`
+      `Installation.upgrade (download phase) did not return a taskid; got: ${JSON.stringify(res)}`
     );
   }
   return taskId;
 }
 
-/** Poll status until DSM reports finished + the installed version flips. The
- *  status endpoint reports `status:"upgrading"` long after the version has
- *  actually swapped, so the version-flip on Package.list is the source of
- *  truth — status `finished:true` is the secondary signal. */
-async function waitForUpgrade(
+/** Poll Installation.status until `finished:true`, then resolve the staged
+ *  .spk path via Installation.Download.check. The path is what the second
+ *  upgrade call needs to actually install. */
+async function waitForDownloadAndGetPath(
   dsm: DsmClient,
-  taskId: string,
-  packageId: string,
-  targetVersion: string
-): Promise<any> {
+  taskId: string
+): Promise<string> {
   const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
-  let lastProgress = -1;
   let lastStatus = "";
   while (Date.now() < deadline) {
     const s = await dsm.call<any>({
@@ -380,50 +392,118 @@ async function waitForUpgrade(
       post: true,
       params: { task_id: taskId },
     });
-    const progress = Number((s as any)?.progress ?? 0);
+    if ((s as any)?.success === false) {
+      throw new Error(`Download failed: ${JSON.stringify(s)}`);
+    }
     const status = String((s as any)?.status ?? "");
-    if (progress !== lastProgress || status !== lastStatus) {
+    if (status !== lastStatus) {
       console.error(
-        `[packages] upgrade ${taskId} progress=${(progress * 100).toFixed(1)}% status=${status}`
+        `[packages] download ${taskId} status=${status} finished=${(s as any)?.finished}`
       );
-      lastProgress = progress;
       lastStatus = status;
     }
-    if ((s as any)?.success === false) {
-      throw new Error(`Upgrade failed mid-flight: ${JSON.stringify(s)}`);
+    if ((s as any)?.finished === true) {
+      const dl = await dsm.call<any>({
+        api: "SYNO.Core.Package.Installation.Download",
+        method: "check",
+        version: 1,
+        post: true,
+        params: { taskid: taskId },
+      });
+      const path = (dl as any)?.filename;
+      if (typeof path !== "string" || path.length === 0) {
+        throw new Error(
+          `Download finished but Download.check returned no filename: ${JSON.stringify(dl)}`
+        );
+      }
+      return path;
     }
-    // The version flip on Package.list is the definitive completion signal.
+    await sleep(DOWNLOAD_POLL_MS);
+  }
+  throw new Error(
+    `Download timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; .spk never finished staging`
+  );
+}
+
+/** Phase 2 of upgrade: lightweight preflight + the install-from-path call.
+ *  The HAR has these batched in a SYNO.Entry.Request compound; sending them
+ *  as separate sequential POSTs is equivalent (DSM doesn't gate the upgrade
+ *  on the check having shared a request). */
+async function applyDownloadedUpgrade(
+  dsm: DsmClient,
+  catalog: CatalogEntry,
+  downloadedPath: string
+): Promise<void> {
+  await dsm.call({
+    api: "SYNO.Core.Package.Installation",
+    method: "check",
+    version: 2,
+    post: true,
+    params: {
+      id: JSON.stringify(catalog.id),
+      install_type: JSON.stringify(catalog.installType),
+      install_on_cold_storage: catalog.installOnColdStorage,
+      breakpkgs: "null",
+      blCheckDep: false,
+      replacepkgs: "null",
+    },
+  });
+  const res = await dsm.call<any>({
+    api: "SYNO.Core.Package.Installation",
+    method: "upgrade",
+    version: 1,
+    post: true,
+    params: {
+      path: JSON.stringify(downloadedPath),
+      extra_values: JSON.stringify("{}"),
+      type: 0,
+      check_codesign: true,
+      force: true,
+      installrunpackage: true,
+    },
+  });
+  const workerMsg = (res as any)?.worker_message;
+  if (Array.isArray(workerMsg) && workerMsg.length > 0) {
+    throw new Error(
+      `Install-from-path returned worker_message: ${JSON.stringify(workerMsg)}`
+    );
+  }
+}
+
+/** Poll Package.list until the version flips to the target. The status
+ *  endpoint reports `status:"upgrading"` long after the swap has happened
+ *  server-side, so Package.list is the authoritative signal. */
+async function waitForVersionFlip(
+  dsm: DsmClient,
+  packageId: string,
+  targetVersion: string
+): Promise<any> {
+  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+  while (Date.now() < deadline) {
     const live = await listOneState(dsm, packageId);
     if (live?.version === targetVersion) return live;
     await sleep(DOWNLOAD_POLL_MS);
   }
   throw new Error(
-    `Upgrade timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package still at old version`
+    `Install timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package still at old version`
   );
 }
 
-/** Cleanup the .spk file DSM staged into /run/synopkg/tmp/. The DSM UI does
- *  this last; best-effort here (we don't fail the whole upgrade if it 4xx's). */
+/** Cleanup the .spk file DSM staged into /volume1/@tmp/synopkg/. The DSM UI
+ *  does this last; best-effort here (we don't fail the whole upgrade if it
+ *  4xx's). */
 async function cleanupUpgradeTmp(
   dsm: DsmClient,
-  taskId: string
+  downloadedPath: string
 ): Promise<void> {
+  if (!downloadedPath) return;
   try {
-    const dl = await dsm.call<any>({
-      api: "SYNO.Core.Package.Installation.Download",
-      method: "check",
-      version: 1,
-      post: true,
-      params: { taskid: taskId },
-    });
-    const path = (dl as any)?.filename;
-    if (typeof path !== "string" || path.length === 0) return;
     await dsm.call({
       api: "SYNO.Core.Package.Installation",
       method: "delete",
       version: 1,
       post: true,
-      params: { path: JSON.stringify(path) },
+      params: { path: JSON.stringify(downloadedPath) },
     });
   } catch {
     // best-effort
@@ -453,15 +533,18 @@ export async function nasPackageUpdate(
   let ok = false;
   let error: string | undefined;
   let taskId: string | undefined;
+  let downloadedPath: string | undefined;
 
   try {
-    // Match the DSM UI's exact sequence (verified from HAR capture).
+    // Match the DSM UI's exact sequence (re-verified from HAR 2026-05-20).
     await feasibilityCheck(dsm, catalog.id);
     await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
     await installationCheckUpgrade(dsm, catalog);
-    taskId = await startUpgrade(dsm, catalog);
-    after = await waitForUpgrade(dsm, taskId, catalog.id, catalog.version);
-    await cleanupUpgradeTmp(dsm, taskId);
+    taskId = await startDownload(dsm, catalog);
+    downloadedPath = await waitForDownloadAndGetPath(dsm, taskId);
+    await applyDownloadedUpgrade(dsm, catalog, downloadedPath);
+    after = await waitForVersionFlip(dsm, catalog.id, catalog.version);
+    await cleanupUpgradeTmp(dsm, downloadedPath);
     ok = after?.version === catalog.version;
     if (!ok) {
       error = `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`;
@@ -472,7 +555,12 @@ export async function nasPackageUpdate(
   } finally {
     await recordWrite(cfg, {
       tool: "nas_package_update",
-      args: { ...args, target_version: catalog.version, task_id: taskId },
+      args: {
+        ...args,
+        target_version: catalog.version,
+        task_id: taskId,
+        downloaded_path: downloadedPath,
+      },
       before,
       after,
       ok,
@@ -591,7 +679,25 @@ export async function nasPackageInstall(
     volumePath = checked.volumePath;
     taskId = await startInstall(dsm, catalog, volumePath);
     after = await waitForInstall(dsm, taskId, catalog.id, catalog.version);
-    await cleanupUpgradeTmp(dsm, taskId);
+    // Install path is not HAR-verified to the same level as upgrade; we
+    // best-effort resolve the staged .spk path so cleanupUpgradeTmp can
+    // delete it. If Download.check returns nothing, skip — leftover .spk
+    // doesn't hurt anything.
+    try {
+      const dl = await dsm.call<any>({
+        api: "SYNO.Core.Package.Installation.Download",
+        method: "check",
+        version: 1,
+        post: true,
+        params: { taskid: taskId },
+      });
+      const path = (dl as any)?.filename;
+      if (typeof path === "string" && path.length > 0) {
+        await cleanupUpgradeTmp(dsm, path);
+      }
+    } catch {
+      // best-effort
+    }
     ok = after?.version === catalog.version;
     if (!ok) {
       error = `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`;
