@@ -57,6 +57,17 @@ export interface DsmCallOptions {
   post?: boolean;
 }
 
+/** DSM error codes we react to programmatically. The DSM Web API is
+ *  reverse-engineered, so this is a small curated subset — see
+ *  docs/dsm-api-quirks.md for the broader catalog. Only codes referenced in
+ *  code belong here; document-only codes live in the quirks doc. */
+export const DSM_ERR = {
+  /** Session ID missing on a request that requires auth. Re-login + retry. */
+  SID_NOT_FOUND: 117,
+  /** Session ID expired or invalidated server-side. Re-login + retry. */
+  SID_EXPIRED: 119,
+} as const;
+
 export class DsmError extends Error {
   constructor(
     public readonly api: string,
@@ -142,7 +153,10 @@ export class DsmClient {
     try {
       return await this.callOnce<T>(opts);
     } catch (err) {
-      if (err instanceof DsmError && (err.code === 119 || err.code === 117)) {
+      if (
+        err instanceof DsmError &&
+        (err.code === DSM_ERR.SID_EXPIRED || err.code === DSM_ERR.SID_NOT_FOUND)
+      ) {
         this.sid = null;
         await this.ensureSession();
         return await this.callOnce<T>(opts);
