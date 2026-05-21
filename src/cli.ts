@@ -29,7 +29,7 @@ async function serveStdio() {
   // the daemon only talks to DSM at cfg.dsmBaseUrl; there are no other
   // outbound HTTPS calls. If you add one, route it explicitly through a
   // verifying agent or restore the per-fetch scoping.
-  if (!cfg.tlsRejectUnauthorized) {
+  if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const dsm = new DsmClient(cfg);
@@ -41,7 +41,7 @@ async function serveStdio() {
 
 async function serveHttp() {
   const cfg = loadConfig();
-  if (!cfg.tlsRejectUnauthorized) {
+  if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   await startHttpDaemon(cfg);

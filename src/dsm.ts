@@ -5,9 +5,9 @@
  * Reference: Synology DSM Login Web API Guide; SYNO.API.* family endpoints.
  * We hit `entry.cgi` for almost everything (the unified DSM dispatcher).
  *
- * TLS: DSM ships with a self-signed cert by default. If
- * `cfg.tlsRejectUnauthorized` is false, the cli sets NODE_TLS_REJECT_UNAUTHORIZED=0
- * process-wide at startup. We do not paper over that here.
+ * TLS: DSM ships with a self-signed cert by default. If `cfg.tlsSkipVerify`
+ * is true, the cli sets NODE_TLS_REJECT_UNAUTHORIZED=0 process-wide at startup.
+ * We do not paper over that here.
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -50,10 +50,8 @@ export interface DsmResponse<T = any> {
 export interface DsmCallOptions {
   api: string;
   method: string;
-  /** API version. Pass a number for an explicit version, or "max" to use the
-   *  value `SYNO.API.Info` reports as `maxVersion` for this API (cached after
-   *  the first lookup). Default: 1. */
-  version?: number | "max";
+  /** API version. Default: 1. */
+  version?: number;
   params?: Record<string, string | number | boolean | undefined>;
   /** Use POST instead of GET (some mutating methods require it). */
   post?: boolean;
@@ -80,11 +78,6 @@ export class DsmClient {
   // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
   private loginInFlight: Promise<void> | null = null;
-  // Cached SYNO.API.Info?query=all response: api name → {min, max}. Populated
-  // lazily on first call that requests version:"max" so cold start isn't
-  // penalised when nothing actually needs version negotiation.
-  private apiVersions: Map<string, { min: number; max: number }> | null = null;
-  private apiVersionsInFlight: Promise<void> | null = null;
 
   constructor(private cfg: Config) {
     const cachePath = process.env.DSM_SID_CACHE_FILE;
@@ -146,73 +139,16 @@ export class DsmClient {
    */
   async call<T = any>(opts: DsmCallOptions): Promise<T> {
     await this.ensureSession();
-    const resolved = await this.resolveVersion(opts);
     try {
-      return await this.callOnce<T>(resolved);
+      return await this.callOnce<T>(opts);
     } catch (err) {
       if (err instanceof DsmError && (err.code === 119 || err.code === 117)) {
         this.sid = null;
         await this.ensureSession();
-        return await this.callOnce<T>(resolved);
+        return await this.callOnce<T>(opts);
       }
       throw err;
     }
-  }
-
-  /** Resolve a `version: "max"` opt-in into a concrete number by consulting
-   *  SYNO.API.Info. No-op for numeric or omitted versions. */
-  private async resolveVersion(opts: DsmCallOptions): Promise<DsmCallOptions> {
-    if (opts.version !== "max") return opts;
-    await this.ensureApiVersions();
-    const entry = this.apiVersions?.get(opts.api);
-    if (!entry) {
-      throw new DsmError(
-        opts.api,
-        opts.method,
-        -1,
-        undefined,
-        `Cannot resolve version "max" for ${opts.api}: not in SYNO.API.Info?query=all response. Pass an explicit version number.`
-      );
-    }
-    return { ...opts, version: entry.max };
-  }
-
-  /** Lazy-load the full API.Info?query=all catalog. Single in-flight promise
-   *  shared across concurrent callers (same shape as login). */
-  private async ensureApiVersions(): Promise<void> {
-    if (this.apiVersions) return;
-    if (!this.apiVersionsInFlight) {
-      this.apiVersionsInFlight = this.fetchApiVersions().finally(() => {
-        this.apiVersionsInFlight = null;
-      });
-    }
-    await this.apiVersionsInFlight;
-  }
-
-  private async fetchApiVersions(): Promise<void> {
-    const data = await this.callOnce<any>({
-      api: "SYNO.API.Info",
-      method: "query",
-      version: 1,
-      params: { query: "all" },
-    });
-    const map = new Map<string, { min: number; max: number }>();
-    for (const [api, info] of Object.entries(data ?? {})) {
-      const min = Number((info as any)?.minVersion);
-      const max = Number((info as any)?.maxVersion);
-      if (Number.isFinite(min) && Number.isFinite(max)) {
-        map.set(api, { min, max });
-      }
-    }
-    this.apiVersions = map;
-    console.error(`[dsm] cached ${map.size} API version entries from API.Info`);
-  }
-
-  /** Public helper: look up `maxVersion` for a given API. Returns null if the
-   *  API isn't in the catalog. Forces a lazy fetch of API.Info on first call. */
-  async getMaxVersion(api: string): Promise<number | null> {
-    await this.ensureApiVersions();
-    return this.apiVersions?.get(api)?.max ?? null;
   }
 
   private async callOnce<T>(opts: DsmCallOptions): Promise<T> {
