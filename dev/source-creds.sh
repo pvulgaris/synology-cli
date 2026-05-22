@@ -19,6 +19,14 @@
 #     security delete-generic-password -s synology-nas-mcp -a "$a"
 #   done
 
+# Local, gitignored overrides — your real NAS hostname and anything else that
+# shouldn't be committed. Sourced before the defaults below so it wins. Copy
+# dev/.env.local.sample → dev/.env.local to set yours. (.env.local is gitignored.)
+_self="${BASH_SOURCE[0]:-$0}"
+_self_dir="$(cd "$(dirname "$_self")" 2>/dev/null && pwd)"
+[ -n "$_self_dir" ] && [ -f "${_self_dir}/.env.local" ] && . "${_self_dir}/.env.local"
+unset _self _self_dir
+
 : "${DSM_OP_VAULT:=Claude}"
 : "${DSM_OP_ITEM:=Synology DSM}"
 : "${DSM_BASE_URL:=https://nas.local:5001}"
