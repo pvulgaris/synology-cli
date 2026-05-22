@@ -25,7 +25,7 @@ The `mcp__synology__*` tools talk to a self-hosted MCP server running on the NAS
 | `nas_packages_list` | installed packages + versions + status |
 | `nas_packages_check_updates` | pending updates (excluding DSM itself) |
 | `nas_package_info` | metadata for one package (publisher, changelog, deps) |
-| `nas_security_advisor_scan` | Security Advisor findings, grouped by severity |
+| `nas_security_advisor_scan` | Security Advisor check counts + the failing rules (passes/skips are counted, not listed) |
 | `nas_users_list` | accounts, 2FA on/off, expired flag |
 | `nas_firewall_list` | rules, auto-block, per-adapter DoS protection |
 | `nas_dsm_security_settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, NFS, auto-update, password policy, Active Insight |

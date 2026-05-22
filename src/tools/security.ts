@@ -18,15 +18,14 @@ import type { DsmClient } from "../dsm.js";
 const SCAN_POLL_MS = 2000;
 const SCAN_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Severity bucket normalization: DSM emits danger/risk/warning/outOfDate/info/safe.
-// Collapse to the four buckets the audit composition consumes.
+// DSM emits per-rule severity as danger/risk/warning/outOfDate/info/safe.
+// Normalize to the three actionable levels we report on failing rules.
 const SEVERITY_BUCKET: Record<string, string> = {
   danger: "critical",
   risk: "critical",
   warning: "warning",
   outofdate: "warning",
   info: "info",
-  safe: "safe",
 };
 
 export async function nasSecurityAdvisorScan(dsm: DsmClient) {
@@ -61,25 +60,34 @@ export async function nasSecurityAdvisorScan(dsm: DsmClient) {
     params: { items: "ALL" },
   });
 
-  const grouped: Record<string, any[]> = {
-    critical: [],
-    warning: [],
-    info: [],
-    safe: [],
-  };
+  // Return only the actionable signal: a per-status count (proof the scan ran,
+  // plus reassurance that N checks passed) and the list of failing rules. The
+  // passing/skipped rules and the empty "safe" bucket were noise — an agent
+  // asking "what's wrong with my NAS?" wants the failures, not a 30-rule dump.
   const items = (results?.items ?? {}) as Record<string, any>;
+  const checks = { total: 0, failed: 0, passed: 0, skipped: 0 };
+  const failures: Array<Record<string, unknown>> = [];
   for (const [ruleId, item] of Object.entries(items)) {
-    const raw = (item.severity ?? "info").toLowerCase();
-    const bucket = SEVERITY_BUCKET[raw] ?? "info";
-    grouped[bucket].push({
+    checks.total++;
+    const status = String(item.status ?? "");
+    if (status === "pass") {
+      checks.passed++;
+      continue;
+    }
+    if (status === "skip") {
+      checks.skipped++;
+      continue;
+    }
+    checks.failed++;
+    const raw = String(item.severity ?? "info").toLowerCase();
+    failures.push({
       id: item.id ?? ruleId,
       title: item.strId,
       category: item.category,
-      severity: item.severity ?? "info",
-      status: item.status,
+      severity: SEVERITY_BUCKET[raw] ?? "info",
     });
   }
-  return { findings: grouped };
+  return { checks, failures };
 }
 
 // DSM 7 returns additional[] fields flat on each user object (not nested).

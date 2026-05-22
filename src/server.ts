@@ -105,7 +105,7 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_security_advisor_scan",
-    "Run DSM Security Advisor; returns findings grouped by severity. Polls until the async scan finishes.",
+    "Run DSM Security Advisor; returns a per-status check count plus the failing rules (passing/skipped rules are summarized in the count, not listed). Polls until the async scan finishes.",
     {},
     safeTool(() => nasSecurityAdvisorScan(dsm))
   );

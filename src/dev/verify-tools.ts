@@ -112,10 +112,11 @@ const ASSERTIONS: Record<string, (out: any) => string | null> = {
     return null;
   },
   nas_security_advisor_scan: (o) => {
-    if (!o.findings) return "no findings";
-    for (const sev of ["critical", "warning", "info", "safe"]) {
-      if (!Array.isArray(o.findings[sev])) return `findings.${sev} not array`;
-    }
+    if (!o.checks || typeof o.checks.total !== "number") return "checks.total not numeric";
+    if (o.checks.total === 0) return "scan returned zero rules (did it run?)";
+    if (!Array.isArray(o.failures)) return "failures not an array";
+    if (o.failures.length !== o.checks.failed)
+      return `failures.length (${o.failures.length}) != checks.failed (${o.checks.failed})`;
     return null;
   },
   nas_external_access: (o) => {
