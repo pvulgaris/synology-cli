@@ -182,8 +182,16 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_package_uninstall",
-    "Uninstall a package. Mutating — confirm with user. DSM may remove linked data. Refuses DSM/kernel. Verifies post-state.",
-    { name: z.string().describe("Package id to uninstall") },
+    "Uninstall a package, PRESERVING its data. Mutating — confirm with user. Refuses DSM/kernel. If the package stores data, returns status:'needs_data_confirmation'; re-call with keep_data:true to proceed (data kept). Data DELETION is package-specific and not supported here — route it to the DSM UI. Verifies post-state.",
+    {
+      name: z.string().describe("Package id to uninstall"),
+      keep_data: z
+        .boolean()
+        .optional()
+        .describe(
+          "Acknowledge that the uninstall preserves the package's data and proceed (mirrors Package Center leaving the 'delete data' box unchecked). false is rejected with a pointer to the DSM UI, since data deletion isn't supported via the MCP."
+        ),
+    },
     safeTool((args) => nasPackageUninstall(cfg, dsm, args))
   );
 

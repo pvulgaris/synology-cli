@@ -16,7 +16,7 @@ import path from "node:path";
 import { mkdtempSync } from "node:fs";
 import type { Config } from "../config.js";
 import type { DsmClient, DsmCallOptions } from "../dsm.js";
-import { nasPackageInstall } from "./packages.js";
+import { nasPackageInstall, nasPackageUninstall } from "./packages.js";
 
 // Force the audit write to a throwaway local file (never the remote POST).
 delete process.env.MCP_AUDIT_URL;
@@ -117,4 +117,85 @@ test("accept_dependencies: installs the resolved queue, dependency first", { tim
   assert.deepEqual([...installed].sort(), ["SynologyDrive", "UniversalViewer"]);
   const order = commits(calls).map((c) => String(JSON.parse(String(c.params.path))).split("/").pop());
   assert.deepEqual(order, ["UniversalViewer", "SynologyDrive"]);
+});
+
+// ── Uninstall: data-decision gate ──────────────────────────────────────────
+
+/** Stateful fake for the uninstall flow: one installed package that disappears
+ *  once `Uninstallation.uninstall` is seen. `Package.list` returns the raw
+ *  `additional.is_uninstall_pages` (omitted when false, as DSM does) — the same
+ *  single read nasPackageUninstall now uses for both state and the data flag. */
+function makeUninstallFake(pkg: { id: string; version: string; status: string; isUninstallPages: boolean }) {
+  let present = true;
+  let status = pkg.status;
+  const calls: Recorded[] = [];
+  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+    const params = (opts.params ?? {}) as Record<string, unknown>;
+    calls.push({ api: opts.api, method: opts.method, params });
+    switch (`${opts.api}.${opts.method}`) {
+      case "SYNO.Core.Package.list": {
+        if (!present) return { packages: [] };
+        return {
+          packages: [
+            {
+              id: pkg.id,
+              name: pkg.id,
+              version: pkg.version,
+              additional: { status, install_type: "", startable: true, ...(pkg.isUninstallPages ? { is_uninstall_pages: true } : {}) },
+            },
+          ],
+        };
+      }
+      case "SYNO.Core.Package.Control.stop":
+        status = "stopped";
+        return {};
+      case "SYNO.Core.Package.Uninstallation.uninstall":
+        present = false;
+        return {};
+      default:
+        throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+    }
+  };
+  return { dsm: { call } as unknown as DsmClient, calls, isPresent: () => present };
+}
+
+const uninstallCalls = (calls: Recorded[]) =>
+  calls.filter((c) => c.api === "SYNO.Core.Package.Uninstallation" && c.method === "uninstall");
+
+test("data-bearing package: gates with needs_data_confirmation, mutates nothing", { timeout: 3000 }, async () => {
+  const { dsm, calls, isPresent } = makeUninstallFake({ id: "ActiveBackup", version: "3.2.0-25053", status: "running", isUninstallPages: true });
+  const res = (await nasPackageUninstall(cfg, dsm, { name: "ActiveBackup" })) as any;
+  assert.equal(res.status, "needs_data_confirmation");
+  assert.equal(uninstallCalls(calls).length, 0);
+  assert.equal(isPresent(), true);
+});
+
+test("keep_data:false is refused (routed to the UI), mutates nothing", { timeout: 3000 }, async () => {
+  const { dsm, calls, isPresent } = makeUninstallFake({ id: "ActiveBackup", version: "3.2.0-25053", status: "running", isUninstallPages: true });
+  await assert.rejects(nasPackageUninstall(cfg, dsm, { name: "ActiveBackup", keep_data: false }), /Package Center|not supported/i);
+  assert.equal(uninstallCalls(calls).length, 0);
+  assert.equal(isPresent(), true);
+});
+
+test("keep_data:true: proceeds with the data-preserving uninstall", { timeout: 3000 }, async () => {
+  const { dsm, calls, isPresent } = makeUninstallFake({ id: "ActiveBackup", version: "3.2.0-25053", status: "running", isUninstallPages: true });
+  const res = (await nasPackageUninstall(cfg, dsm, { name: "ActiveBackup", keep_data: true })) as any;
+  assert.equal(res.removed, true);
+  assert.equal(res.had_data_dialog, true);
+  assert.equal(res.stopped, true);
+  assert.equal(isPresent(), false);
+  // Exactly one uninstall, targeting this package, with NO delete key
+  // (extra_values) — i.e. the data-preserving call.
+  const uc = uninstallCalls(calls);
+  assert.equal(uc.length, 1);
+  assert.equal(uc[0].params.id, "ActiveBackup");
+  assert.equal(uc[0].params.extra_values, undefined);
+});
+
+test("no-data package: uninstalls directly without gating", { timeout: 3000 }, async () => {
+  const { dsm, isPresent } = makeUninstallFake({ id: "UniversalViewer", version: "1.4.0-0712", status: "stopped", isUninstallPages: false });
+  const res = (await nasPackageUninstall(cfg, dsm, { name: "UniversalViewer" })) as any;
+  assert.equal(res.removed, true);
+  assert.equal(res.had_data_dialog, false);
+  assert.equal(isPresent(), false);
 });

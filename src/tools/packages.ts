@@ -100,6 +100,9 @@ interface InstalledPackage {
     beta?: boolean;
     install_type?: string;
     startable?: boolean;
+    /** True when the package ships a custom uninstall dialog (the one offering
+     *  to delete its data). Surfaced so uninstall can warn the user. */
+    is_uninstall_pages?: boolean;
   };
 }
 
@@ -170,7 +173,8 @@ export async function nasPackagesList(dsm: DsmClient) {
     method: "list",
     version: 2,
     params: {
-      additional: '["description","status","beta","install_type","startable"]',
+      additional:
+        '["description","status","beta","install_type","startable","is_uninstall_pages"]',
     },
   });
   return {
@@ -185,6 +189,10 @@ export async function nasPackagesList(dsm: DsmClient) {
         is_system: p.additional?.install_type === "system",
         install_type: p.additional?.install_type,
         startable: !!p.additional?.startable,
+        // True when the package ships the uninstall dialog that offers to delete
+        // its data — surfaced so nas_package_uninstall can gate on it without a
+        // second Package.list round-trip.
+        has_uninstall_dialog: p.additional?.is_uninstall_pages === true,
       },
     })),
   };
@@ -967,12 +975,46 @@ export async function nasPackageControl(
 export async function nasPackageUninstall(
   cfg: Config,
   dsm: DsmClient,
-  args: { name: string }
+  args: { name: string; keep_data?: boolean }
 ) {
   refuseIfProtected(args.name);
   const before = await listOneState(dsm, args.name);
   if (!before) {
     throw new Error(`Package "${args.name}" is not installed; nothing to uninstall.`);
+  }
+
+  // Mirror Package Center's uninstall dialog: a package with the uninstall
+  // dialog (`has_uninstall_dialog`, already carried by `before` from the initial
+  // Package.list read) offers to delete its data. That deletion rides
+  // `extra_values` with a PACKAGE-SPECIFIC key (`pkgwizard_remove_cstn_db` for
+  // Synology Drive, different per package) defined in the package's own
+  // client-side wizard — not exposed by any queryable API. So the human chooses:
+  // proceed with the default data-preserving uninstall, or go to the DSM UI to
+  // delete the data. The MCP only ever does the data-preserving uninstall (the
+  // delete key is unsafe to drive blind), so deletion is always routed to the UI.
+  const hadDataDialog = before.additional?.has_uninstall_dialog === true;
+  if (hadDataDialog) {
+    if (args.keep_data === false) {
+      throw new Error(
+        `Deleting "${args.name}"'s data on uninstall isn't supported via the MCP — ` +
+          `the delete option is package-specific. To remove its data, uninstall via ` +
+          `Package Center (DSM UI) and check "Delete the items listed above". ` +
+          `Re-run with keep_data:true to uninstall while PRESERVING the data.`
+      );
+    }
+    if (args.keep_data === undefined) {
+      return {
+        status: "needs_data_confirmation",
+        package: { id: before.id, version: before.version },
+        message:
+          `"${args.name}" stores associated data and settings. Uninstalling via the ` +
+          `MCP removes the package but PRESERVES that data on disk. To also DELETE ` +
+          `the data, uninstall via Package Center (DSM UI) — that option is ` +
+          `package-specific and not exposed safely through the API. Re-run ` +
+          `nas_package_uninstall with keep_data:true to proceed (data kept).`,
+      };
+    }
+    // keep_data === true → proceed with the default, data-preserving uninstall.
   }
 
   let stopped = false;
@@ -1007,5 +1049,8 @@ export async function nasPackageUninstall(
     }
   );
 
-  return { before, after, removed: ok, stopped };
+  // The MCP never deletes data, so an uninstall is *always* data-preserving;
+  // `had_data_dialog` reports whether this package had the deletable-data option
+  // (i.e. whether data was left behind that the UI could have removed).
+  return { before, after, removed: ok, stopped, had_data_dialog: hadDataDialog };
 }

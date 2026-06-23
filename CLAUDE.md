@@ -80,6 +80,8 @@ When bumping the version, only update `package.json` — `src/version.ts` reads 
 
 **Uninstall** is a single call: `SYNO.Core.Package.Uninstallation.uninstall` with `id` and `dsm_apps=""`. The `dsm_apps` field is a list of linked DSM apps to remove together, NOT a "keep data" flag.
 
+**Uninstall data deletion is package-specific (HAR-verified 2026-06-23).** Package Center's "Delete the items listed above" checkbox rides `extra_values` carrying a **per-package** wizard key — `"{\"pkgwizard_remove_cstn_db\":true}"` for Synology Drive; ABB and others differ. That key is defined in each package's own client-side uninstall wizard, NOT exposed by any queryable API (`is_uninstall_pages:true` in `Package.list` only flags that a dialog *exists*; there's no precheck method — `Uninstallation` has only `uninstall`). So the MCP can detect a data-bearing package but can't safely drive its delete-data option blind. `nasPackageUninstall` therefore only ever does the **data-preserving** uninstall (omit `extra_values`): when `is_uninstall_pages` is true it returns `status:"needs_data_confirmation"` and requires `keep_data:true` to proceed; `keep_data:false` is refused with a pointer to the DSM UI (the honest path for actual deletion). Mirrors the install dependency-confirmation pattern.
+
 ## DSM API quirks (the consolidated cheatsheet)
 
 A reference of error codes, response shapes, and known API names is at [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) — read it before adding new tools or debugging unexpected `code:` errors. Highlights:
