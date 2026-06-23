@@ -157,9 +157,21 @@ export async function startHttpDaemon(
     }
   });
 
-  await new Promise<void>((resolve) =>
-    app.listen(port, host, () => resolve())
-  );
+  const httpServer = await new Promise<import("node:http").Server>((resolve) => {
+    const s = app.listen(port, host, () => resolve(s));
+  });
+  // A streamable-HTTP MCP tool call rides one long-lived response. Node's
+  // default `requestTimeout` (300s) would guillotine a legitimately-slow op
+  // mid-flight — exactly the failure we hit on package installs — so disable
+  // the per-request ceiling and let each tool bound its own work (the package
+  // flow does, via its download/verify timeouts). `headersTimeout` still guards
+  // against a client that opens a socket and never sends headers, and
+  // `keepAliveTimeout` is bumped so pooled client connections aren't reaped
+  // between calls. Client-side undici bodyTimeout (~300s with no SSE
+  // heartbeats) remains the outer bound for any single op.
+  httpServer.requestTimeout = 0;
+  httpServer.headersTimeout = 60_000;
+  httpServer.keepAliveTimeout = 75_000;
   console.error(`[http] listening on http://${host}:${port}/mcp`);
   return { host, port };
 }

@@ -68,11 +68,22 @@ interface DownloadCheckResp {
   filename?: string;
 }
 
+/** One entry in DSM's resolved install queue. DSM transitively resolves
+ *  dependencies server-side and returns the full ordered plan (deps first,
+ *  target last), so executing this flat list mirrors Package Center's
+ *  "the following operations will also be performed" install exactly. */
+interface QueueItem {
+  pkg: string;
+  beta?: boolean;
+  volume?: string;
+}
+
 interface QueueResp {
   broken_pkgs?: unknown[];
   conflicted_pkgs?: unknown[];
   non_exist_pkgs?: unknown[];
   paused_pkgs?: unknown[];
+  queue?: QueueItem[];
 }
 
 interface ApplyUpgradeResp {
@@ -124,6 +135,16 @@ const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — big packages can be sl
 const DOWNLOAD_POLL_MS = 2000;
 const POSTOP_VERIFY_TIMEOUT_MS = 5 * 60 * 1000;
 const POSTOP_POLL_MS = 3000;
+
+// Install-flow waits are deliberately tighter than the upgrade flow's 15-min
+// budget. The MCP call rides a single streamable-HTTP response with no SSE
+// heartbeats, so the client's undici bodyTimeout (~300s) drops the connection
+// if nothing returns. Synology-repo packages download + commit in seconds, so
+// these bounds fit comfortably inside the transport window and turn the old
+// silent 15-min hang into a fast, clear "issued but not confirmed — poll
+// nas_packages_list" error on the rare pathological case.
+const INSTALL_DOWNLOAD_TIMEOUT_MS = 3 * 60 * 1000; // 3 min — .spk fetch
+const INSTALL_VERIFY_TIMEOUT_MS = 90 * 1000; // 90s — version flip after commit
 
 function refuseIfProtected(name: string) {
   if (HARD_REFUSE_NAMES.has(name)) {
@@ -344,14 +365,18 @@ async function feasibilityCheck(
   });
 }
 
-/** Ask DSM to plan the install queue. Returns broken/conflicted/paused
- *  packages so we can refuse early if there's a known dep problem. */
+/** Ask DSM to plan the install queue. Throws on broken/conflicted/paused
+ *  packages (a known dep problem). Returns DSM's resolved ordered queue —
+ *  dependencies first, target last — which the install flow executes verbatim.
+ *  The catalog's `depend_packages` field is unreliable (it was `null` for
+ *  Synology Drive Server, which nonetheless requires Universal Viewer); the
+ *  queue is the only honest source of the dependency set. */
 async function getInstallQueue(
   dsm: DsmClient,
   packageId: string,
   version: string,
   beta: boolean
-): Promise<void> {
+): Promise<QueueItem[]> {
   const res = await dsm.call<QueueResp>({
     api: "SYNO.Core.Package.Installation",
     method: "get_queue",
@@ -367,10 +392,11 @@ async function getInstallQueue(
     const arr = res?.[key];
     if (Array.isArray(arr) && arr.length > 0) {
       throw new Error(
-        `Cannot upgrade ${packageId}: ${key.replace("_pkgs", "")} = ${JSON.stringify(arr)}`
+        `Cannot install ${packageId}: ${key.replace("_pkgs", "")} = ${JSON.stringify(arr)}`
       );
     }
   }
+  return Array.isArray(res?.queue) ? res.queue : [];
 }
 
 /** Installation.check v=2 — preflight that returns the volume_path DSM will
@@ -413,10 +439,12 @@ async function installationCheck(
  *  not the file transfer. Use Installation.status's `finished:true` to know
  *  the .spk is on disk.
  *
- *  The install path is NOT HAR-verified to the same level as upgrade (we only
- *  captured an upgrade), but the symmetric assumption is the same DSM Package
- *  Center JS code path; the prior multi-step "download then install with path"
- *  shape failed the same way our pre-v0.2.11 upgrade did. */
+ *  This call only DOWNLOADS — for BOTH modes. Verified against the live NAS:
+ *  after `Installation.install` returns and status flips to "installing",
+ *  Download.check still reports the package as `status:"non_installed"` /
+ *  "failed to locate given package", and it never lands in Package.list. The
+ *  actual commit is the second-phase call (applyDownloadedUpgrade /
+ *  applyInstallFromPath) with `installrunpackage:true`. */
 async function startInstallation(
   dsm: DsmClient,
   catalog: CatalogEntry,
@@ -457,9 +485,10 @@ async function startInstallation(
  *  upgrade call needs to actually install. */
 async function waitForDownloadAndGetPath(
   dsm: DsmClient,
-  taskId: string
+  taskId: string,
+  timeoutMs: number = DOWNLOAD_TIMEOUT_MS
 ): Promise<string> {
-  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   let lastStatus = "";
   while (Date.now() < deadline) {
     const s = await dsm.call<InstallStatusResp>({
@@ -497,7 +526,7 @@ async function waitForDownloadAndGetPath(
     await sleep(DOWNLOAD_POLL_MS);
   }
   throw new Error(
-    `Download timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; .spk never finished staging`
+    `Download timeout after ${timeoutMs / 1000}s; .spk never finished staging`
   );
 }
 
@@ -545,68 +574,121 @@ async function applyDownloadedUpgrade(
   }
 }
 
+/** Fresh-install equivalent of `applyDownloadedUpgrade`: the second-phase
+ *  commit. Step 4's `Installation.install` only DOWNLOADS the .spk (verified
+ *  against the live NAS — the package reports `status:"non_installed"`,
+ *  "failed to locate given package", and never lands in Package.list). This
+ *  second `Installation.install` with `path` + `installrunpackage:true` is what
+ *  actually commits it. Differs from the upgrade apply by method (`install` not
+ *  `upgrade`) and by passing `volume_path` for the install target.
+ *
+ *  DSM frequently drops the TCP connection mid-commit while finishing
+ *  server-side (the documented Package.* POST quirk) — observed on Synology
+ *  Drive Server, which registers many `dsm_apps`. Network-level errors are
+ *  therefore soft: we log and let the caller's Package.list poll confirm. Any
+ *  DSM-level error (a real failure) still propagates. */
+async function applyInstallFromPath(
+  dsm: DsmClient,
+  catalog: CatalogEntry,
+  downloadedPath: string,
+  volumePath: string
+): Promise<void> {
+  await dsm.call({
+    api: "SYNO.Core.Package.Installation",
+    method: "check",
+    version: 2,
+    post: true,
+    params: {
+      id: JSON.stringify(catalog.id),
+      install_type: JSON.stringify(catalog.installType),
+      install_on_cold_storage: catalog.installOnColdStorage,
+      breakpkgs: "null",
+      blCheckDep: false,
+      replacepkgs: "null",
+    },
+  });
+  const params: Record<string, string | number | boolean> = {
+    path: JSON.stringify(downloadedPath),
+    extra_values: JSON.stringify("{}"),
+    type: 0,
+    check_codesign: true,
+    force: true,
+    installrunpackage: true,
+  };
+  if (volumePath) params.volume_path = JSON.stringify(volumePath);
+  try {
+    const res = await dsm.call<ApplyUpgradeResp>({
+      api: "SYNO.Core.Package.Installation",
+      method: "install",
+      version: 1,
+      post: true,
+      params,
+    });
+    if (Array.isArray(res?.worker_message) && res.worker_message.length > 0) {
+      throw new Error(
+        `Install-from-path returned worker_message: ${JSON.stringify(res.worker_message)}`
+      );
+    }
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    const isNetwork =
+      /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(msg);
+    if (!isNetwork) throw err;
+    console.error(
+      `[packages] install-from-path ${catalog.id}: connection dropped mid-commit — verifying via Package.list poll`
+    );
+  }
+}
+
+/** Two-phase install of a single package: check → download → resolve staged
+ *  path → install-from-path → verify the version flip → clean up the .spk.
+ *  Used for both the target and each resolved dependency. Throws (bounded) if
+ *  the package never lands within INSTALL_VERIFY_TIMEOUT_MS. */
+async function installOnePackage(
+  dsm: DsmClient,
+  catalog: CatalogEntry
+): Promise<PackageState> {
+  console.error(`[packages] install ${catalog.id} ${catalog.version}: check`);
+  const { volumePath } = await installationCheck(dsm, catalog, false);
+  console.error(`[packages] install ${catalog.id}: download`);
+  const taskId = await startInstallation(dsm, catalog, "install", volumePath);
+  const downloadedPath = await waitForDownloadAndGetPath(
+    dsm,
+    taskId,
+    INSTALL_DOWNLOAD_TIMEOUT_MS
+  );
+  console.error(`[packages] install ${catalog.id}: commit (install-from-path)`);
+  await applyInstallFromPath(dsm, catalog, downloadedPath, volumePath);
+  console.error(`[packages] install ${catalog.id}: verify version flip`);
+  const after = await waitForVersionFlip(
+    dsm,
+    catalog.id,
+    catalog.version,
+    INSTALL_VERIFY_TIMEOUT_MS
+  );
+  await cleanupUpgradeTmp(dsm, downloadedPath);
+  return after;
+}
+
 /** Poll Package.list until the version flips to the target. The status
  *  endpoint reports `status:"upgrading"` long after the swap has happened
  *  server-side, so Package.list is the authoritative signal. */
 async function waitForVersionFlip(
   dsm: DsmClient,
   packageId: string,
-  targetVersion: string
+  targetVersion: string,
+  timeoutMs: number = DOWNLOAD_TIMEOUT_MS
 ): Promise<PackageState> {
-  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const live = await listOneState(dsm, packageId);
     if (live?.version === targetVersion) return live;
     await sleep(DOWNLOAD_POLL_MS);
   }
   throw new Error(
-    `Install timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package still at old version`
-  );
-}
-
-/** Install-flow completion poller. Same Package.list version-flip signal as
- *  upgrade, plus a per-tick Installation.status check whose only job is to
- *  catch `success === false` early — otherwise a doomed install would sit on
- *  the 15-min timeout instead of failing in seconds. The install method
- *  isn't HAR-verified at the same level as upgrade, so we keep this
- *  defense-in-depth signal here even though CLAUDE.md notes status is
- *  unreliable for *completion* detection. Package.list is sampled at a
- *  slower cadence than status — version-flip is rare during install but
- *  the response carries every installed package's `additional[]` payload. */
-async function waitForInstall(
-  dsm: DsmClient,
-  taskId: string,
-  packageId: string,
-  targetVersion: string
-): Promise<PackageState> {
-  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
-  let nextListCheck = 0;
-  let lastStatus = "";
-  while (Date.now() < deadline) {
-    const s = await dsm.call<InstallStatusResp>({
-      api: "SYNO.Core.Package.Installation",
-      method: "status",
-      version: 1,
-      post: true,
-      params: { task_id: taskId },
-    });
-    if (s?.success === false) {
-      throw new Error(`Install failed mid-flight: ${JSON.stringify(s)}`);
-    }
-    const status = String(s?.status ?? "");
-    if (status !== lastStatus) {
-      console.error(`[packages] install ${taskId} status=${status}`);
-      lastStatus = status;
-    }
-    if (Date.now() >= nextListCheck) {
-      const live = await listOneState(dsm, packageId);
-      if (live?.version === targetVersion) return live;
-      nextListCheck = Date.now() + DOWNLOAD_POLL_MS * 3;
-    }
-    await sleep(DOWNLOAD_POLL_MS);
-  }
-  throw new Error(
-    `Install timeout after ${DOWNLOAD_TIMEOUT_MS / 1000}s; package not yet showing in Package.list`
+    `Install of ${packageId} issued but not confirmed within ${timeoutMs / 1000}s ` +
+      `(package not yet at ${targetVersion} in Package.list). DSM may still be ` +
+      `committing — re-check with nas_packages_list before retrying.`
   );
 }
 
@@ -684,7 +766,7 @@ export async function nasPackageUpdate(
 export async function nasPackageInstall(
   cfg: Config,
   dsm: DsmClient,
-  args: { name: string; version?: string }
+  args: { name: string; version?: string; accept_dependencies?: boolean }
 ) {
   refuseIfProtected(args.name);
   const [before, catalog] = await Promise.all([
@@ -697,49 +779,82 @@ export async function nasPackageInstall(
     );
   }
 
+  // Non-mutating preflight: ask DSM to resolve the install plan. feasibility +
+  // get_queue download and change nothing on the NAS, so it's safe to return
+  // the plan here without an audit record (we only audit actual mutations).
+  await feasibilityCheck(dsm, catalog.id);
+  const queue = await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
+
+  // DSM's resolved queue is the dependency set: every entry that isn't the
+  // target is a package DSM will pull in. Mirror Package Center's "the
+  // following operations will also be performed when X is installed — continue?"
+  // dialog: surface the plan and require explicit acknowledgement before we
+  // mutate anything.
+  const depItems = queue.filter((q) => q.pkg !== catalog.id);
+  if (depItems.length > 0 && !args.accept_dependencies) {
+    const deps = await Promise.all(
+      depItems.map(async (q) => {
+        try {
+          const c = await findInCatalog(dsm, q.pkg);
+          return { id: c.id, version: c.version };
+        } catch {
+          return { id: q.pkg, version: null as string | null };
+        }
+      })
+    );
+    const human = deps
+      .map((d) => `${d.id}${d.version ? ` ${d.version}` : ""}`)
+      .join(", ");
+    return {
+      status: "needs_dependency_confirmation",
+      target: { id: catalog.id, version: catalog.version },
+      will_also_install: deps,
+      message:
+        `Installing ${catalog.id} (${catalog.version}) requires DSM to also install: ${human}. ` +
+        `This is Package Center's "the following operations will also be performed" prompt. ` +
+        `Re-run nas_package_install with accept_dependencies:true to install all of them.`,
+    };
+  }
+
+  // Execute DSM's resolved queue in order (dependencies first, target last),
+  // each via the two-phase download→install-from-path flow. Fall back to a
+  // bare target install if DSM returned an empty queue.
+  const order = queue.map((q) => q.pkg);
+  if (!order.includes(catalog.id)) order.push(catalog.id);
+
+  const dependenciesInstalled: Array<{ id: string; version: string }> = [];
   const { after, ok } = await withAudit(
     cfg,
-    { tool: "nas_package_install", args: { ...args, target_version: catalog.version }, before },
+    {
+      tool: "nas_package_install",
+      args: { ...args, target_version: catalog.version, queue: order },
+      before,
+    },
     async (ctx) => {
-      // Mirror the verified DSM UI sequence — preflight, queue, check, then the
-      // single-call install. blupgrade=false here vs upgrade flow's =true.
-      await feasibilityCheck(dsm, catalog.id);
-      await getInstallQueue(dsm, catalog.id, catalog.version, catalog.beta);
-      const checked = await installationCheck(dsm, catalog, false);
-      ctx.volume_path = checked.volumePath;
-      const taskId = await startInstallation(dsm, catalog, "install", checked.volumePath);
-      ctx.task_id = taskId;
-      const after = await waitForInstall(dsm, taskId, catalog.id, catalog.version);
-      // Install path is not HAR-verified to the same level as upgrade; we
-      // best-effort resolve the staged .spk path so cleanupUpgradeTmp can
-      // delete it. If Download.check returns nothing, skip — leftover .spk
-      // doesn't hurt anything.
-      try {
-        const dl = await dsm.call<DownloadCheckResp>({
-          api: "SYNO.Core.Package.Installation.Download",
-          method: "check",
-          version: 1,
-          post: true,
-          params: { taskid: taskId },
-        });
-        if (typeof dl?.filename === "string" && dl.filename.length > 0) {
-          await cleanupUpgradeTmp(dsm, dl.filename);
-        }
-      } catch {
-        // best-effort
+      const completed: string[] = [];
+      ctx.queue = order;
+      ctx.completed = completed;
+      let targetAfter: PackageState = null;
+      for (const pkgId of order) {
+        const cat =
+          pkgId === catalog.id ? catalog : await findInCatalog(dsm, pkgId);
+        const state = await installOnePackage(dsm, cat);
+        completed.push(pkgId);
+        if (pkgId === catalog.id) targetAfter = state;
+        else dependenciesInstalled.push({ id: cat.id, version: cat.version });
       }
-      const ok = after?.version === catalog.version;
+      const ok = targetAfter?.version === catalog.version;
       return {
-        after,
+        after: targetAfter,
         ok,
         error: ok
           ? undefined
-          : `Post-state: expected ${catalog.version}, observed ${after?.version ?? "<not installed>"}`,
+          : `Post-state: expected ${catalog.version}, observed ${targetAfter?.version ?? "<not installed>"}`,
       };
     }
   );
 
-  return { before, after, verified: ok };
+  return { before, after, verified: ok, dependencies_installed: dependenciesInstalled };
 }
 
 /** SYNO.Core.Package.Control wrapper. Idempotent: DSM returns success for

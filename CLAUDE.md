@@ -57,7 +57,7 @@ Both reverse-engineered from a DevTools HAR capture.
 
 When bumping the version, only update `package.json` — `src/version.ts` reads it at startup and both `server.ts` and `http.ts` import the constant. The docker tag in the build command is just the human-facing label; nothing depends on it matching.
 
-## Write flow: update (two-phase, download then install-from-path)
+## Write flow: install & update (two-phase, download then install-from-path)
 
 `src/tools/packages.ts:nasPackageUpdate` runs the DSM UI's exact sequence — re-verified from a HAR capture on 2026-05-20. The first `Installation.upgrade` only downloads the .spk; a **second** `Installation.upgrade` with `path` + `installrunpackage:true` is what actually installs. The v0.2.11–v0.2.25 implementation thought the first call did everything and silently failed on packages that don't auto-install post-download (HybridShare, FileStation — left orphaned .spks in `/volume1/@tmp/synopkg/download.*/`).
 
@@ -72,7 +72,9 @@ When bumping the version, only update `package.json` — `src/version.ts` reads 
 9. **Poll `Package.list`** until `version` flips (`Installation.status` keeps reporting `"upgrading"` long after the actual swap, so it isn't reliable). 15-min timeout.
 10. **`Installation.delete path=<staged>`** — cleanup; best-effort.
 
-`nasPackageInstall` still uses the older single-call `Installation.install` shape (NOT HAR-verified for fresh installs). If a fresh install ever shows the same "version never flipped" symptom, it likely needs the same two-phase split with `Installation.install` step 8 instead of `upgrade`.
+`nasPackageInstall` now uses the **same two-phase split**, verified against the live NAS — the prediction in earlier revisions of this doc came true. Step 4's `Installation.install` only *downloads* (status flips to `"installing"` but `Download.check` reports `status:"non_installed"` / "failed to locate given package", and the package never lands in `Package.list`); the commit is a **second** `Installation.install` with `path` + `installrunpackage:true` + `force:true` + `check_codesign:true` (step 8, method `install` not `upgrade`, plus `volume_path`). Before the fix, the missing commit made the completion poll wait for a version flip that never came → silent spin to the 15-min timeout → the client's undici bodyTimeout (~300s, no SSE heartbeats) dropped the call ("transport dropped mid-call"). The commit returns in seconds; install waits are now bounded (`INSTALL_DOWNLOAD_TIMEOUT_MS` 3 min, `INSTALL_VERIFY_TIMEOUT_MS` 90 s) so a stuck op fails fast with "issued but not confirmed — poll nas_packages_list" instead of hanging.
+
+**Dependencies (the queue is the source of truth).** Catalog `depend_packages` is unreliable — it was `null` for Synology Drive Server, which nonetheless requires Universal Viewer. `Installation.get_queue` returns DSM's fully-resolved, ordered plan (deps first, target last), e.g. `[UniversalViewer, SynologyDrive]`; `nasPackageInstall` executes that flat list verbatim, each entry two-phase. When the queue contains packages beyond the target, the tool returns `status:"needs_dependency_confirmation"` listing them (mirroring Package Center's confirmed "the following operations will also be performed" dialog) and installs nothing until re-called with `accept_dependencies:true`. The second-phase commit on big packages (Synology Drive registers many `dsm_apps`) frequently drops the TCP connection mid-call but succeeds server-side — `applyInstallFromPath` treats network-level errors as soft and confirms via the `Package.list` poll, same as `controlPackage`. (With a dependency *unmet*, `Download.check` returns code **4526** naming the dep — but the queue-first execution means that path isn't normally reached.)
 
 **Form-encoding gotcha.** DSM JSON-parses each form value. Strings must carry quotes on the wire (`name="FileStation"`), bools/numbers/null are literal, arrays/objects are JSON-stringified. The code uses `JSON.stringify(...)` for string values so they appear quoted in the form body.
 
@@ -86,7 +88,8 @@ A reference of error codes, response shapes, and known API names is at [`docs/ds
 - `requestFormat: "JSON"` in `SYNO.API.Info` describes the **response**, not the request — always send form-encoded.
 - `additional[]` response keys are FLAT on User/Share objects but NESTED under `additional` on Package objects.
 - Per-adapter calls (DoS, GeoIP) use `configs=[{adapter: ifname}, ...]` as a JSON-stringified single form field.
-- State-changing POSTs (e.g., `Package.Control.stop`) frequently drop the TCP connection mid-execution while completing server-side — catch network-level errors and verify via status poll.
+- State-changing POSTs (e.g., `Package.Control.stop`, `Installation.install` from-path) frequently drop the TCP connection mid-execution while completing server-side — catch network-level errors and verify via status/list poll.
+- A streamable-HTTP MCP tool call rides one long-lived response with **no SSE heartbeats**, so the client's undici bodyTimeout (~300s) drops it if nothing returns in time. `http.ts` disables Node's 300s `requestTimeout` (so the server doesn't add its own cut), but each tool must still bound its own work to return inside the client window — the package flow does (`INSTALL_*_TIMEOUT_MS`). Ops that legitimately exceed ~250s would need SSE keepalives (not yet wired).
 
 ## Hard-won lessons, in roughly the order we learned them
 
@@ -163,6 +166,6 @@ These are conscious omissions, not gaps. If a future request actually requires o
 - Btrfs snapshot helper — users can snapshot via DSM UI if they want pre-mutation insurance.
 - Recent-logins, SecAdvisor history — none mapped to a stated user request.
 - An `nas_audit_log` read tool — JSONL is on disk; reading it is a file-system op, not an MCP one.
-- Transitive dependency installs. `nas_package_install` surfaces missing deps with a clear error and asks the user to install each one. Auto-recursion is too much blast radius for a write tool.
+- ~~Transitive dependency installs.~~ **Shipped** — `nas_package_install` executes DSM's resolved `get_queue` plan (deps first, target last) after a `needs_dependency_confirmation` round-trip. The old "too much blast radius" worry was about *us* recursively chasing deps-of-deps; in practice DSM hands back the complete ordered queue in one call, so executing it is bounded and matches the Package Center UI. See the Write-flow section.
 - Cold-storage installs. We pass `install_on_cold_storage` from the catalog through to `Installation.check`; if a user hits a package whose catalog flag forces cold-storage and DSM refuses, they fall back to the UI.
 - Package-specific `extra_values` (e.g. SurveillanceStation needs `chkSVS_Alias: true`). DSM's UI handles these via dedicated form dialogs. The MCP install path uses the upgrade-style shape that doesn't require `extra_values`; if you encounter a package that needs custom values, install via DSM UI once and let the persisted state cover subsequent updates.

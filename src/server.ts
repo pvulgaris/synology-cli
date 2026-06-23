@@ -163,13 +163,19 @@ export function createServer(cfg: Config, dsm: DsmClient): McpServer {
 
   server.tool(
     "nas_package_install",
-    "Install a package from the Synology repo. Mutating — confirm with user. Refuses DSM/kernel and already-installed packages. Verifies post-state.",
+    "Install a package from the Synology repo. Mutating — confirm with user. Refuses DSM/kernel and already-installed packages. If the package has dependencies, returns status:'needs_dependency_confirmation' listing them; re-call with accept_dependencies:true to install the whole set. Verifies post-state.",
     {
       name: z.string().describe("Package id to install (e.g. 'TextEditor')"),
       version: z
         .string()
         .optional()
         .describe("Specific version; omit for latest"),
+      accept_dependencies: z
+        .boolean()
+        .optional()
+        .describe(
+          "Acknowledge installing the dependencies DSM resolves for this package (mirrors Package Center's confirmation dialog). Without it, a package with dependencies returns the plan instead of installing."
+        ),
     },
     safeTool((args) => nasPackageInstall(cfg, dsm, args))
   );
