@@ -4,8 +4,9 @@
  * synology-nas-mcp — entry point.
  *
  * Subcommands:
- *   serve     Run MCP over stdio (for `claude mcp add` / claude.json or local dev).
- *   daemon    Run MCP over Streamable HTTP on the configured interface/port.
+ *   serve         Run MCP over stdio (for `claude mcp add` / claude.json or local dev).
+ *   daemon        Run MCP over Streamable HTTP on the configured interface/port.
+ *   bridge        stdio→HTTP proxy for Claude Desktop config (runs on the Mac).
  *
  * Required env (both modes):
  *   DSM_BASE_URL, DSM_OP_VAULT, OP_SERVICE_ACCOUNT_TOKEN
@@ -17,7 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
-import { DsmClient } from "./dsm.js";
+import { DsmClient, makeRouterClient } from "./dsm.js";
 import { startHttpDaemon } from "./http.js";
 
 async function serveStdio() {
@@ -25,15 +26,17 @@ async function serveStdio() {
   // Process-wide TLS skip for DSM's self-signed cert. We tried a per-fetch
   // undici dispatcher in v0.2.12 but it interacted badly with Node 22's
   // built-in fetch (intermittent "fetch failed" + silently-empty responses
-  // on some endpoints). The blast radius of process-wide skip is bounded:
-  // the daemon only talks to DSM at cfg.dsmBaseUrl; there are no other
-  // outbound HTTPS calls. If you add one, route it explicitly through a
-  // verifying agent or restore the per-fetch scoping.
+  // on some endpoints). The blast radius of process-wide skip is bounded to
+  // DSM-shaped targets: DSM at cfg.dsmBaseUrl and, when a router is configured,
+  // SRM at cfg.router.baseUrl (also self-signed). If you add a non-Synology
+  // outbound, route THAT call through a per-call verifying undici Agent
+  // (rejectUnauthorized:true) to override the global skip.
   if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const dsm = new DsmClient(cfg);
-  const server = createServer(cfg, dsm);
+  const router = makeRouterClient(cfg);
+  const server = createServer(cfg, dsm, router);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[serve] synology-nas-mcp ready on stdio");
@@ -49,8 +52,9 @@ async function serveHttp() {
 
 /**
  * Bridge subcommand: a tiny stdio MCP server that proxies to the HTTP daemon.
- * Use this from Claude Desktop, which only accepts stdio MCP entries — the
- * bridge runs on your Mac, the daemon runs on the NAS.
+ * Use this from Claude Desktop's claude_desktop_config.json (stdio-only — not a
+ * direct HTTP URL; Custom Connectors are cloud-brokered and don't fit tailnet
+ * bearer auth). The bridge runs on your Mac, the daemon runs on the NAS.
  *
  * Required env (set in claude_desktop_config.json under "env"):
  *   MCP_BRIDGE_URL    e.g. http://nas.local:8765/mcp
@@ -115,7 +119,8 @@ async function main() {
       break;
     default:
       console.error(
-        `Unknown command: ${cmd}. Use 'serve' (stdio direct), 'daemon' (HTTP), or 'bridge' (stdio→HTTP proxy).`
+        `Unknown command: ${cmd}. Use 'serve' (stdio direct), 'daemon' (HTTP), ` +
+          `or 'bridge' (stdio→HTTP proxy).`
       );
       process.exit(2);
   }
