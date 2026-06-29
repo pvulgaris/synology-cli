@@ -1,6 +1,6 @@
 /**
  * Regression tests for the fresh-install flow. Drives nasPackageInstall against
- * a fake DsmClient (every tool routes all DSM I/O through dsm.call, so one
+ * a fake SynoClient (every tool routes all DSM I/O through dsm.call, so one
  * stubbed method covers the whole flow) — no live NAS, deterministic, fast.
  *
  * These pin the bug fixed alongside them: the old single-call install only
@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
 import type { Config } from "../config.js";
-import type { DsmClient, DsmCallOptions } from "../dsm.js";
+import type { SynoClient, DsmCallOptions } from "../dsm.js";
 import {
   nasPackageInstall,
   nasPackageUninstall,
@@ -101,7 +101,7 @@ function makeFake(queue: Array<{ pkg: string }>) {
         throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
     }
   };
-  return { dsm: { call } as unknown as DsmClient, calls, installed };
+  return { dsm: { call } as unknown as SynoClient, calls, installed };
 }
 
 const commits = (calls: Recorded[]) =>
@@ -180,7 +180,7 @@ function makeUninstallFake(pkg: { id: string; version: string; status: string; i
         throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
     }
   };
-  return { dsm: { call } as unknown as DsmClient, calls, isPresent: () => present };
+  return { dsm: { call } as unknown as SynoClient, calls, isPresent: () => present };
 }
 
 const uninstallCalls = (calls: Recorded[]) =>
@@ -238,7 +238,7 @@ function makeCatalogFake() {
     }
     throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
   };
-  return { call } as unknown as DsmClient;
+  return { call } as unknown as SynoClient;
 }
 
 test("nas_package_info: surfaces name/publisher/description/dependencies from the real dname/maintainer/desc/deppkgs fields", async () => {
@@ -276,7 +276,7 @@ function makeNamelessCatalogFake() {
     }
     throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
   };
-  return { call } as unknown as DsmClient;
+  return { call } as unknown as SynoClient;
 }
 
 test("normalizer: dname-less row falls back to id on nas_package_info", async () => {
