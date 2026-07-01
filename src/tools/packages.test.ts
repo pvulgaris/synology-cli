@@ -289,3 +289,45 @@ test("normalizer: dname-less row falls back to id on nas_packages_check_updates"
   assert.equal(res.pending.length, 1);
   assert.equal(res.pending[0].name, "MariaDB10");
 });
+
+// Regression: DSM drops the TCP connection mid-commit on big packages while the
+// install completes server-side (undici surfaces "terminated"/ECONNRESET). That
+// must degrade to the Package.list poll, not hard-fail. The fake marks the package
+// installed (server-side success) and THEN throws a dropped-connection error.
+test("install: a dropped connection mid-commit degrades to the version-flip poll", { timeout: 3000 }, async () => {
+  const installed = new Set<string>();
+  let pendingId = "";
+  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+    switch (`${opts.api}.${opts.method}`) {
+      case "SYNO.Core.Package.list":
+        return { packages: [...installed].map((id) => ({ id, name: id, version: "1.0.0-1000", additional: { status: "running" } })) };
+      case "SYNO.Core.Package.Server.list":
+        return { packages: CATALOG };
+      case "SYNO.Core.Package.feasibility_check":
+        return {};
+      case "SYNO.Core.Package.Installation.get_queue":
+        return { queue: [{ pkg: "TextEditor" }], broken_pkgs: [], conflicted_pkgs: [], non_exist_pkgs: [], paused_pkgs: [] };
+      case "SYNO.Core.Package.Installation.check":
+        return { volume_list: [{ mount_point: "/volume1" }] };
+      case "SYNO.Core.Package.Installation.install":
+        if ((opts.params ?? {}).installrunpackage !== undefined) {
+          installed.add(pendingId); // server-side commit succeeds...
+          throw new Error("terminated"); // ...but the TCP connection drops mid-commit
+        }
+        pendingId = JSON.parse(String((opts.params ?? {}).name));
+        return { taskid: `@SYNOPKG_DOWNLOAD_${pendingId}` };
+      case "SYNO.Core.Package.Installation.status":
+        return { finished: true, success: true, status: "installing" };
+      case "SYNO.Core.Package.Installation.Download.check":
+        return { filename: `/volume1/@tmp/synopkg/download/${pendingId}` };
+      case "SYNO.Core.Package.Installation.delete":
+        return {};
+      default:
+        throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+    }
+  };
+  const dsm = { call } as unknown as SynoClient;
+  const res = (await nasPackageInstall(cfg, dsm, { name: "TextEditor" })) as any;
+  assert.equal(res.verified, true);
+  assert.equal(res.after.version, "1.0.0-1000");
+});

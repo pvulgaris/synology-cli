@@ -31,13 +31,14 @@ import {
 
 const SID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-// Bound every HTTP call. A target reachable at the TCP layer but unresponsive at
-// the application layer (a wedged SRM web service, a stalled TLS handshake) would
-// otherwise hang on undici's multi-minute default — and because the digest awaits
-// all sources, one such router would withhold the whole result past the MCP
-// client's ~300s drop, defeating the "one device down never aborts the rest"
-// guarantee. Reads return in seconds, so 30s is generous; on timeout fetch rejects
-// (AbortError, not a DsmError) and the caller's catch / runSource surfaces it.
+// Bound every GET read (writes/POST are exempt — see callOnce). A target reachable
+// at the TCP layer but unresponsive at the application layer (a wedged SRM web
+// service, a stalled TLS handshake) would otherwise hang on undici's multi-minute
+// default — and because the digest awaits all sources, one such router would
+// withhold the whole result past the MCP client's ~300s drop, defeating the "one
+// device down never aborts the rest" guarantee. Reads return in seconds, so 30s is
+// generous; on timeout fetch rejects (AbortError, not a DsmError) and the caller's
+// catch / runSource surfaces it.
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // Dev-only: persist the SID across `tsx` invocations so the harness doesn't
@@ -269,8 +270,13 @@ export class SynoClient {
 
     const headers: Record<string, string> = {};
     if (opts.post) headers["Content-Type"] = "application/x-www-form-urlencoded";
+    // Bound only GET reads: the 30s cap exists to stop one hung target from wedging
+    // the digest's parallel read fan-out. State-changing POSTs are exempt — they keep
+    // undici's default so a slow-but-successful commit that drops the TCP connection
+    // degrades via isSoftTransportError's poll instead of hard-failing on a 30s abort
+    // the write flow can't distinguish from success.
     const init: RequestInit = opts.post
-      ? { method: "POST", headers, body: body.toString(), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }
+      ? { method: "POST", headers, body: body.toString() }
       : { method: "GET", headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
     const res = await fetch(url, init);
     const json = (await res.json()) as DsmResponse<T>;

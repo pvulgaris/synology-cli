@@ -42,6 +42,7 @@
 
 import type { Config } from "../config.js";
 import type { SynoClient } from "../dsm.js";
+import { DsmError } from "../dsm.js";
 import { withAudit } from "../audit.js";
 
 // DSM response shapes used by the install/uninstall/update flows. None are
@@ -198,6 +199,19 @@ const POSTOP_POLL_MS = 3000;
 // nas_packages_list" error on the rare pathological case.
 const INSTALL_DOWNLOAD_TIMEOUT_MS = 3 * 60 * 1000; // 3 min — .spk fetch
 const INSTALL_VERIFY_TIMEOUT_MS = 90 * 1000; // 90s — version flip after commit
+
+/** A "soft" transport error on a state-changing POST: the request didn't get a
+ *  clean DSM response, but the mutation likely completed server-side, so the
+ *  caller should confirm via a status/list poll rather than fail. Covers the
+ *  mid-commit TCP drop DSM is known for (ECONNRESET / socket hang up / undici
+ *  "terminated" / "fetch failed"). Writes aren't capped by dsm.ts's 30s timeout
+ *  (that's GET-only), so a clean AbortError/TimeoutError isn't expected here; a
+ *  DsmError, by contrast, means DSM answered and must propagate. */
+function isSoftTransportError(err: unknown): boolean {
+  if (err instanceof DsmError) return false;
+  const msg = String((err as { message?: string } | null)?.message ?? err);
+  return /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(msg);
+}
 
 function refuseIfProtected(name: string) {
   if (HARD_REFUSE_NAMES.has(name)) {
@@ -676,26 +690,28 @@ async function applyInstallFromPath(
     installrunpackage: true,
   };
   if (volumePath) params.volume_path = JSON.stringify(volumePath);
+  let res: ApplyUpgradeResp | undefined;
   try {
-    const res = await dsm.call<ApplyUpgradeResp>({
+    res = await dsm.call<ApplyUpgradeResp>({
       api: "SYNO.Core.Package.Installation",
       method: "install",
       version: 1,
       post: true,
       params,
     });
-    if (Array.isArray(res?.worker_message) && res.worker_message.length > 0) {
-      throw new Error(
-        `Install-from-path returned worker_message: ${JSON.stringify(res.worker_message)}`
-      );
-    }
   } catch (err: any) {
-    const msg = String(err?.message ?? err);
-    const isNetwork =
-      /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(msg);
-    if (!isNetwork) throw err;
+    if (!isSoftTransportError(err)) throw err;
     console.error(
       `[packages] install-from-path ${catalog.id}: connection dropped mid-commit — verifying via Package.list poll`
+    );
+  }
+  // Checked OUTSIDE the try: a populated worker_message is a genuine DSM-level
+  // install failure and must propagate — it must never be caught by the
+  // soft-transport handler (whose broadened match could otherwise swallow a
+  // worker message that happens to contain "aborted"/"timed out"/"terminated").
+  if (res && Array.isArray(res.worker_message) && res.worker_message.length > 0) {
+    throw new Error(
+      `Install-from-path returned worker_message: ${JSON.stringify(res.worker_message)}`
     );
   }
 }
@@ -937,9 +953,7 @@ async function controlPackage(
       params: { id: packageId },
     });
   } catch (err: any) {
-    const msg = String(err?.message ?? err);
-    const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
-    if (!isNetwork) throw err;
+    if (!isSoftTransportError(err)) throw err;
     console.error(
       `[packages] ${method} ${packageId}: connection dropped — verifying via poll`
     );
