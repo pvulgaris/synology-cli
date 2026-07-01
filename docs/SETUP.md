@@ -101,15 +101,18 @@ Use Container Manager's **Project** feature, not Container. Project mode reads
 
 ### One-time setup
 
-1. Build the image locally on your Mac (cross-build to linux/amd64 for x86_64 Synology models; use `linux/arm64` on ARM models):
+1. Build the image locally on your Mac with Apple `container` + `skopeo` (cross-build to linux/amd64 for x86_64 Synology models; use `linux/arm64` on ARM models). DSM's Container Manager imports a docker-archive, so `skopeo` converts the OCI archive `container` produces:
 
    ```sh
    cd <repo>
-   docker build --platform linux/amd64 -t synology-nas-mcp:latest .
-   docker save synology-nas-mcp:latest -o ~/Downloads/synology-nas-mcp-latest.tar
+   container build --platform linux/amd64 -t synology-nas-mcp:latest .
+   container image save --platform linux/amd64 synology-nas-mcp:latest -o /tmp/oci.tar
+   skopeo copy --override-os linux --override-arch amd64 \
+     oci-archive:/tmp/oci.tar \
+     docker-archive:~/Downloads/synology-nas-mcp-latest.tar:synology-nas-mcp:latest
    ```
 
-   (If you don't have Docker: `brew install colima docker && colima start` first.)
+   Needs `brew install container skopeo` (Colima/Docker are no longer used). **Gotcha:** skopeo writes the RepoTag fully-qualified (`docker.io/library/synology-nas-mcp:latest`) in the archive's `manifest.json` + legacy `repositories` file; DSM imports that as a *distinct* image and never reassigns the bare `synology-nas-mcp:latest` tag the Compose project pulls — so the container silently keeps the old image. Rewrite the RepoTags to the bare name before importing (extract → edit `manifest.json`/`repositories` → re-tar).
 
 2. Prepare the NAS directory. DSM → File Station → `/volume1/docker/`. Create folder `synology-nas-mcp`. Inside it, create folder `audit`. Upload three files into `synology-nas-mcp/`:
    - The image tar from step 1 (`synology-nas-mcp-latest.tar`).
@@ -127,10 +130,14 @@ Use Container Manager's **Project** feature, not Container. Project mode reads
 ### Upgrades
 
 ```sh
-docker build --platform linux/amd64 -t synology-nas-mcp:<ver> -t synology-nas-mcp:latest .
-docker save synology-nas-mcp:<ver> synology-nas-mcp:latest -o ~/Downloads/synology-nas-mcp-<ver>.tar
+container build --platform linux/amd64 -t synology-nas-mcp:<ver> .
+container image save --platform linux/amd64 synology-nas-mcp:<ver> -o /tmp/oci.tar
+skopeo copy --override-os linux --override-arch amd64 \
+  oci-archive:/tmp/oci.tar \
+  docker-archive:~/Downloads/synology-nas-mcp-<ver>.tar:synology-nas-mcp:latest
+# then rewrite the archive's RepoTags to the bare `synology-nas-mcp` name (see the build gotcha above)
 source dev/source-creds.sh   # once per shell; reads creds from 1Password via op
-npm run deploy                # imports image → stops+builds+starts project → polls /health
+npm run deploy                # imports image → recreates project → polls /health
 ```
 
 Total wall time on Tailscale: ~30 seconds, most of it the 60 MB tar upload.
