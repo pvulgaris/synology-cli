@@ -42,8 +42,16 @@ jobs:
           # which silently posts nothing). allowedTools: gh for the review subagents +
           # the summary "no issues" comment, and the inline-comment MCP tool so per-line
           # findings can be posted. See the two-model investigation in PR discussion.
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # The trailing instruction defeats the plugin's step-1 "skip automated PRs"
+          # gate, which otherwise mis-fires on our "🤖 Generated with Claude Code"
+          # PR footers and silently bails without reviewing.
+          prompt: |
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+            Review this PR even if it is Claude-generated or self-labeled as automated (e.g. a "Generated with Claude Code" footer). Only skip the review if the PR is closed, is a draft, or already has a claude[bot] review comment.
           claude_args: '--allowedTools "Bash(gh:*),mcp__github_inline_comment__create_inline_comment"'
+          # show_full_output exposes the model transcript in the Actions log (default
+          # hides it "for security") so we can verify which path the review takes.
+          show_full_output: true
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
