@@ -264,3 +264,29 @@ test("nas_packages_check_updates: pending entries carry the real display name", 
     { id: "Tailscale", name: "Tailscale", installed_version: "1.58.2-700058000", available_version: "1.58.2-700058002", changelog: "", beta: false },
   ]);
 });
+
+// The normalizer is the one place the dname→id fallback lives, so a catalog row
+// without `dname` must surface `name: <id>` (never undefined) on every read path.
+function makeNamelessCatalogFake() {
+  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+    if (opts.api === "SYNO.Core.Package.Server" && opts.method === "list") {
+      return { packages: [{ id: "MariaDB10", version: "10.11.6-1405" }] }; // no dname
+    }
+    if (opts.api === "SYNO.Core.Package" && opts.method === "list") {
+      return { packages: [{ id: "MariaDB10", version: "10.11.6-1400" }] };
+    }
+    throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+  };
+  return { call } as unknown as DsmClient;
+}
+
+test("normalizer: dname-less row falls back to id on nas_package_info", async () => {
+  const res = (await nasPackageInfo(makeNamelessCatalogFake(), { name: "MariaDB10" })) as any;
+  assert.equal(res.name, "MariaDB10");
+});
+
+test("normalizer: dname-less row falls back to id on nas_packages_check_updates", async () => {
+  const res = await nasPackagesCheckUpdates(makeNamelessCatalogFake());
+  assert.equal(res.pending.length, 1);
+  assert.equal(res.pending[0].name, "MariaDB10");
+});

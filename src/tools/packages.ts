@@ -139,6 +139,49 @@ interface CatalogListResp {
   packages?: CatalogPackage[];
 }
 
+/** Canonical, endpoint-agnostic view of a catalog package. DSM's
+ *  SYNO.Core.Package.Server spells these `dname`/`maintainer`/`desc`/`deppkgs`
+ *  and `install_*`; every consumer downstream speaks the canonical names below
+ *  instead. This is the single place the wire→canonical mapping lives, so it
+ *  can't drift per call site (the class of bug this file already fixed once) —
+ *  including the display-name fallback, applied here exactly once. */
+interface CatalogInfo {
+  id: string;
+  /** Display name, with a guaranteed fallback to the id (dname is optional). */
+  name: string;
+  version: string;
+  publisher?: string;
+  description?: string;
+  dependencies?: unknown;
+  changelog?: string;
+  size?: number | string;
+  beta?: boolean;
+  link?: string;
+  md5?: string;
+  source?: string;
+  installType?: string;
+  installOnColdStorage?: boolean;
+}
+
+function normalizeCatalogPackage(p: CatalogPackage): CatalogInfo {
+  return {
+    id: p.id,
+    name: p.dname || p.id,
+    version: p.version,
+    publisher: p.maintainer,
+    description: p.desc,
+    dependencies: p.deppkgs,
+    changelog: p.changelog,
+    size: p.size,
+    beta: p.beta,
+    link: p.link,
+    md5: p.md5,
+    source: p.source,
+    installType: p.install_type,
+    installOnColdStorage: p.install_on_cold_storage,
+  };
+}
+
 const HARD_REFUSE_NAMES = new Set(["DSM", "kernel"]);
 
 const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — big packages can be slow
@@ -229,13 +272,14 @@ export async function nasPackagesCheckUpdates(dsm: DsmClient) {
     const installedVersion = installedVersionById.get(p.id);
     if (!installedVersion) continue;
     if (installedVersion === p.version) continue;
+    const info = normalizeCatalogPackage(p);
     pending.push({
-      id: p.id,
-      name: p.dname,
+      id: info.id,
+      name: info.name,
       installed_version: installedVersion,
-      available_version: p.version,
-      changelog: p.changelog,
-      beta: p.beta,
+      available_version: info.version,
+      changelog: info.changelog,
+      beta: info.beta,
     });
   }
   return { pending };
@@ -264,16 +308,17 @@ export async function nasPackageInfo(
       `Package "${args.name}" not found in the Synology repo catalog for this DS.`
     );
   }
+  const info = normalizeCatalogPackage(pkg);
   return {
-    id: pkg.id,
-    name: pkg.dname,
-    version: pkg.version,
-    publisher: pkg.maintainer,
-    description: pkg.desc,
-    changelog: pkg.changelog,
-    dependencies: pkg.deppkgs,
-    size: pkg.size,
-    beta: pkg.beta,
+    id: info.id,
+    name: info.name,
+    version: info.version,
+    publisher: info.publisher,
+    description: info.description,
+    changelog: info.changelog,
+    dependencies: info.dependencies,
+    size: info.size,
+    beta: info.beta,
   };
 }
 
@@ -319,22 +364,23 @@ async function findInCatalog(
       `Package "${packageId}" not found in the Synology repo catalog for this DS. For non-repo packages, install via Package Center → Manual Install with a .spk file.`
     );
   }
-  if (!pkg.link || !pkg.md5 || pkg.size == null) {
+  const info = normalizeCatalogPackage(pkg);
+  if (!info.link || !info.md5 || info.size == null) {
     throw new Error(
       `Catalog entry for "${packageId}" is missing download fields (link/md5/size): ${JSON.stringify(pkg)}`
     );
   }
   return {
-    id: pkg.id,
-    name: pkg.dname ?? pkg.id,
-    version: pkg.version,
-    link: pkg.link,
-    md5: pkg.md5,
-    size: String(pkg.size),
-    source: pkg.source ?? "",
-    beta: !!pkg.beta,
-    installType: pkg.install_type ?? "",
-    installOnColdStorage: !!pkg.install_on_cold_storage,
+    id: info.id,
+    name: info.name,
+    version: info.version,
+    link: info.link,
+    md5: info.md5,
+    size: String(info.size),
+    source: info.source ?? "",
+    beta: !!info.beta,
+    installType: info.installType ?? "",
+    installOnColdStorage: !!info.installOnColdStorage,
   };
 }
 
