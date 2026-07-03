@@ -32,7 +32,7 @@ services:
       OP_SERVICE_ACCOUNT_TOKEN: ${OP_SERVICE_ACCOUNT_TOKEN}
       DSM_BASE_URL: ${DSM_BASE_URL}
       DSM_OP_VAULT: ${DSM_OP_VAULT}
-      DSM_OP_ITEM: ${DSM_OP_ITEM:-Synology DSM - claude-mcp}
+      DSM_OP_ITEM: ${DSM_OP_ITEM:-Synology DSM}
       DSM_USER: ${DSM_USER:-claude-mcp}
       MCP_BIND_HOST: ${MCP_BIND_HOST:-}
       MCP_BIND_PORT: ${MCP_BIND_PORT:-8765}

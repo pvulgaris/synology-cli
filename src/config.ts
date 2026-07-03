@@ -3,8 +3,8 @@
  *
  * Required:
  *   DSM_BASE_URL          e.g. https://localhost:5001 (in-container) or https://nas.local:5001 (laptop dev)
- *   DSM_OP_VAULT          1Password vault name holding the "Synology DSM - claude-mcp" item
- *   DSM_OP_ITEM           1Password item name (default: "Synology DSM - claude-mcp")
+ *   DSM_OP_VAULT          1Password vault name holding the "Synology DSM" item
+ *   DSM_OP_ITEM           1Password item name (default: "Synology DSM")
  *   DSM_USER              DSM account name (default: "claude-mcp")
  *
  * Optional:
@@ -55,7 +55,7 @@ export function loadConfig(): Config {
     dsmBaseUrl,
     dsmUser: optional("DSM_USER", "claude-mcp"),
     opVault: required("DSM_OP_VAULT"),
-    opItem: optional("DSM_OP_ITEM", "Synology DSM - claude-mcp"),
+    opItem: optional("DSM_OP_ITEM", "Synology DSM"),
     mcpBindHost: process.env.MCP_BIND_HOST ?? null,
     mcpBindPort: parseInt(optional("MCP_BIND_PORT", "8765"), 10),
     allowedOrigins,

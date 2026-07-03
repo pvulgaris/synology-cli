@@ -99,7 +99,7 @@ These are gotchas that aren't obvious from the code. Each one was a real bug we 
 
 ### 1Password item names: ASCII hyphen only
 
-`op read op://vault/item/field` rejects unicode dashes (em-dash `—`, en-dash `–`) in item names with "invalid character in secret reference." Spaces are fine; only the dashes need to be ASCII. The default in `config.ts` is `Synology DSM - claude-mcp` — don't change it to the prettier em-dash.
+`op read op://vault/item/field` matches the item by its **title** and rejects unicode dashes (em-dash `—`, en-dash `–`) in item names with "invalid character in secret reference." Spaces are fine; only dashes need to be ASCII. The default in `config.ts` is `Synology DSM` — the bare item **title**; `claude-mcp` is the item's **username**, not part of the title (that tripped a review once). If you rename the item with a hyphen, keep it ASCII, not a prettier em-dash.
 
 ### `claude-mcp` has to be in `administrators`
 

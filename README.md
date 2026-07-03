@@ -31,7 +31,7 @@ Setup steps are in [`docs/SETUP.md`](docs/SETUP.md). Each step is discrete; unin
 | HTTP port | 8765 (configurable) |
 | Audit log | `/volume1/docker/synology-nas-mcp/audit/YYYY-MM.jsonl` |
 | DSM user | `claude-mcp` (admin group, 2FA, shared-folder access denied) |
-| Secrets | 1Password item "Synology DSM - claude-mcp" (ASCII hyphen, not em-dash) |
+| Secrets | 1Password item titled "Synology DSM" (username `claude-mcp`) |
 | Outbound | localhost:5001 (DSM API) only |
 
 ## License
