@@ -19,6 +19,10 @@ on:
 
 jobs:
   claude-review:
+    # Skip fork PRs: on a public repo they get no secrets (no OAuth token, no
+    # usable id-token), so the action would fail at auth on every push. Only
+    # same-repo PRs can authenticate.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
