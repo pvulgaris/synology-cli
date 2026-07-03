@@ -32,7 +32,7 @@ Setup steps are in [`docs/SETUP.md`](docs/SETUP.md). Each step is discrete; unin
 | Audit log | `/volume1/docker/synology-mcp/audit/YYYY-MM.jsonl` |
 | DSM user | `claude-mcp` (admin group, 2FA, shared-folder access denied) |
 | Secrets | 1Password item titled "Synology DSM" (username `claude-mcp`) |
-| Outbound | localhost:5001 (DSM API) only |
+| Outbound | localhost:5001 (DSM API); plus the SRM router's URL when a router target is configured |
 
 ## License
 
