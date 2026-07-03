@@ -47,7 +47,7 @@ Residual risk: full DSM compromise if (1Password vault leaks) AND (Tailscale dev
 
 In 1Password:
 
-1. Create item **"Synology DSM - claude-mcp"** in a vault you don't share. Use only ASCII hyphens (`-`), not em-dashes (`—`) — the `op read` CLI rejects em-dashes in secret references. Fields:
+1. Create item titled **"Synology DSM"** (set its username to `claude-mcp`) in a vault you don't share. `op` matches the item by its **title**, so keep it exactly `Synology DSM` — or set `DSM_OP_ITEM` to whatever you name it. If you do put a hyphen in the title, use an ASCII hyphen (`-`), not an em-dash (`—`) — `op read` rejects em-dashes in secret references. Fields:
    - `password` — the DSM password set above
    - `totp` — the TOTP **secret** (not a generated code; the raw base32 string DSM showed when you enabled 2FA)
    - `mcp_bearer_token` — generate a random 32-byte hex string: `openssl rand -hex 32`
@@ -150,10 +150,10 @@ Manual fallback (no script needed): import the tar via Container Manager UI → 
 
 ## 7. Verify
 
-From a Mac on the tailnet, hit the serve URL (read the bearer via `op read "op://<vault>/Synology DSM - claude-mcp/mcp_bearer_token"`):
+From a Mac on the tailnet, hit the serve URL (read the bearer via `op read "op://<vault>/Synology DSM/mcp_bearer_token"`):
 
 ```sh
-TOKEN=$(op read "op://<vault>/Synology DSM - claude-mcp/mcp_bearer_token")
+TOKEN=$(op read "op://<vault>/Synology DSM/mcp_bearer_token")
 curl -i https://<your-nas>.<your-tailnet>.ts.net/health
 # expect: 200 OK {"ok":true,"server":"synology-nas-mcp","version":"..."}
 
@@ -195,7 +195,7 @@ After meaningful code changes, re-run `npm install -g .` to update the global in
 
 Claude Code CLI (one Mac):
 ```sh
-TOKEN=$(op read "op://<vault>/Synology DSM - claude-mcp/mcp_bearer_token")
+TOKEN=$(op read "op://<vault>/Synology DSM/mcp_bearer_token")
 claude mcp add synology https://<your-nas>.<your-tailnet>.ts.net/mcp --header "Authorization: Bearer $TOKEN"
 ```
 
