@@ -1,23 +1,24 @@
 name: Claude Code Review
 
+# Direct-prompt PR reviewer (NOT the code-review plugin).
+#
+# The plugin (`/code-review:code-review`, what `/install-github-app` scaffolds)
+# has two built-in skip gates tuned for human-team repos: "skip automated/bot
+# PRs" and "skip if Claude already commented". This is a solo repo where every
+# PR is Claude-authored (🤖 footer) and Claude is also the reviewer, so both
+# gates fire against us and reviews silently no-op. See anthropics/claude-code
+# #19618 (closed "not planned") and claude-code-action #1087 / #674 / #27358.
+#
+# This direct-prompt form has no plugin and no gates: the action auto-detects
+# automation mode from the `prompt:` input on a pull_request event, Claude
+# reviews the diff and posts comments every time. Simpler and predictable.
+
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,22 +37,25 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          # --comment makes the plugin POST findings to the PR (default is terminal-only,
-          # which silently posts nothing). allowedTools: gh for the review subagents +
-          # the summary "no issues" comment, and the inline-comment MCP tool so per-line
-          # findings can be posted. See the two-model investigation in PR discussion.
-          # The trailing instruction defeats the plugin's step-1 "skip automated PRs"
-          # gate, which otherwise mis-fires on our "🤖 Generated with Claude Code"
-          # PR footers and silently bails without reviewing.
           prompt: |
-            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
-            Review this PR even if it is Claude-generated or self-labeled as automated (e.g. a "Generated with Claude Code" footer). Only skip the review if the PR is closed, is a draft, or already has a claude[bot] review comment.
-          claude_args: '--allowedTools "Bash(gh:*),mcp__github_inline_comment__create_inline_comment"'
-          # show_full_output exposes the model transcript in the Actions log (default
-          # hides it "for security") so we can verify which path the review takes.
-          show_full_output: true
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+            Review pull request #${{ github.event.pull_request.number }} in the
+            repository ${{ github.repository }}.
 
+            Get the changes with `gh pr diff ${{ github.event.pull_request.number }}`
+            and read the surrounding code as needed for context. Review this PR even
+            though it is Claude-authored — do not skip it for being automated.
+
+            Focus only on things that matter:
+            - correctness bugs, logic errors, unhandled error/edge cases
+            - security issues (injection, auth, secret handling, unsafe input)
+            - violations of this repo's CLAUDE.md conventions
+            Skip pure style/nitpick comments.
+
+            Post each concrete issue as an inline comment on the exact line using
+            the mcp__github_inline_comment__create_inline_comment tool. Then always
+            post one summary comment with `gh pr comment` — list the issues found,
+            or exactly "No issues found. Checked for bugs and CLAUDE.md compliance."
+            if the diff is clean. Post the summary even when there are no issues.
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Read,Grep,Glob,Bash(gh:*),Bash(git:*),mcp__github_inline_comment__create_inline_comment"
