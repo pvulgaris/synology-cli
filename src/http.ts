@@ -16,7 +16,6 @@ import { loadCredentials } from "./auth.js";
 import { DsmClient } from "./dsm.js";
 import { createServer } from "./server.js";
 import { VERSION } from "./version.js";
-import { appendAuditRecord, type AuditRecord } from "./audit.js";
 
 function resolveBindHost(cfg: Config): string {
   if (cfg.mcpBindHost) return cfg.mcpBindHost;
@@ -109,30 +108,6 @@ export async function startHttpDaemon(
   // a "ready" state after first use and 500s on subsequent calls. We hoist
   // the DsmClient outside (singleton with SID cache) so per-request server
   // creation is cheap.
-  // Audit ingest endpoint — accepts a pre-built AuditRecord and appends it to
-  // the canonical NAS-side log. Used by dev tsx invocations (via MCP_AUDIT_URL)
-  // so the local cache doesn't become a fork of the truth.
-  app.post("/audit", authMw, async (req, res) => {
-    const rec = req.body as Partial<AuditRecord> | undefined;
-    if (
-      !rec ||
-      typeof rec.ts !== "string" ||
-      typeof rec.tool !== "string" ||
-      typeof rec.ok !== "boolean" ||
-      typeof rec.args !== "object"
-    ) {
-      res.status(400).json({ error: "invalid audit record" });
-      return;
-    }
-    try {
-      await appendAuditRecord(cfg, rec as AuditRecord);
-      res.status(204).end();
-    } catch (err: any) {
-      console.error("[/audit]", err?.message ?? err);
-      res.status(500).json({ error: String(err?.message ?? err) });
-    }
-  });
-
   app.all("/mcp", authMw, async (req, res) => {
     try {
       const server = createServer(cfg, dsm);

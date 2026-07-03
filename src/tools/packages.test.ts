@@ -23,8 +23,7 @@ import {
   nasPackagesCheckUpdates,
 } from "./packages.js";
 
-// Force the audit write to a throwaway local file (never the remote POST).
-delete process.env.MCP_AUDIT_URL;
+// Audit records are written to a throwaway local dir per test run.
 const cfg = {
   auditLogDir: mkdtempSync(path.join(os.tmpdir(), "synmcp-test-")),
 } as unknown as Config;

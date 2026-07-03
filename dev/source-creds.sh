@@ -28,15 +28,15 @@ unset OP_SERVICE_ACCOUNT_TOKEN
 : "${DSM_OP_ITEM:=Synology DSM}"
 : "${DSM_BASE_URL:=https://nas.local:5001}"
 : "${DSM_USER:=claude-mcp}"
-# Local audit fallback (used only when MCP_AUDIT_URL is unset); the canonical
-# log lives on the NAS via the daemon's POST /audit endpoint.
+# A local dev run writes its audit records to this per-user cache dir; the
+# production daemon writes to the NAS-mounted /audit instead, so a dev run's
+# writes don't land in the NAS's canonical trail.
 : "${AUDIT_LOG_DIR:=$HOME/.cache/synology-nas-mcp/audit}"
-: "${MCP_AUDIT_URL:=http://nas.local:8765/audit}"
 # Persist the DSM SID across tsx runs so we don't burn a TOTP code each process
 # (DSM rejects TOTP reuse within the 30s window with code 404).
 : "${DSM_SID_CACHE_FILE:=$HOME/.cache/synology-nas-mcp/sid.json}"
 export DSM_OP_VAULT DSM_OP_ITEM DSM_BASE_URL DSM_USER \
-       AUDIT_LOG_DIR MCP_AUDIT_URL DSM_SID_CACHE_FILE
+       AUDIT_LOG_DIR DSM_SID_CACHE_FILE
 # Cache dir holds the SID + audit log — keep it owner-only.
 mkdir -p "$AUDIT_LOG_DIR" "$(dirname "$DSM_SID_CACHE_FILE")" 2>/dev/null
 chmod 700 "$AUDIT_LOG_DIR" "$(dirname "$DSM_SID_CACHE_FILE")" 2>/dev/null
