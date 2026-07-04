@@ -48,4 +48,4 @@ jobs:
             correctness, security, or CLAUDE.md-convention issues (skip style
             nitpicks), or exactly "No issues found. Checked for bugs and CLAUDE.md
             compliance." if the diff is clean. Always post the comment.
-          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh:*)" --max-turns 20'
+          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh:*)" --max-turns 30'
