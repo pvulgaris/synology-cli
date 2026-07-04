@@ -105,37 +105,37 @@ Use Container Manager's **Project** feature, not Container. Project mode reads
 
    ```sh
    cd <repo>
-   container build --platform linux/amd64 -t synology-nas-mcp:latest .
-   container image save --platform linux/amd64 synology-nas-mcp:latest -o /tmp/oci.tar
+   container build --platform linux/amd64 -t synology-mcp:latest .
+   container image save --platform linux/amd64 synology-mcp:latest -o /tmp/oci.tar
    skopeo copy --override-os linux --override-arch amd64 \
      oci-archive:/tmp/oci.tar \
-     docker-archive:~/Downloads/synology-nas-mcp-latest.tar:synology-nas-mcp:latest
+     docker-archive:~/Downloads/synology-mcp-latest.tar:synology-mcp:latest
    ```
 
-   Needs `brew install container skopeo` (Colima/Docker are no longer used). **Gotcha:** skopeo writes the RepoTag fully-qualified (`docker.io/library/synology-nas-mcp:latest`) in the archive's `manifest.json` + legacy `repositories` file; DSM imports that as a *distinct* image and never reassigns the bare `synology-nas-mcp:latest` tag the Compose project pulls — so the container silently keeps the old image. Rewrite the RepoTags to the bare name before importing (extract → edit `manifest.json`/`repositories` → re-tar).
+   Needs `brew install container skopeo` (Colima/Docker are no longer used). **Gotcha:** skopeo writes the RepoTag fully-qualified (`docker.io/library/synology-mcp:latest`) in the archive's `manifest.json` + legacy `repositories` file; DSM imports that as a *distinct* image and never reassigns the bare `synology-mcp:latest` tag the Compose project pulls — so the container silently keeps the old image. Rewrite the RepoTags to the bare name before importing (extract → edit `manifest.json`/`repositories` → re-tar).
 
-2. Prepare the NAS directory. DSM → File Station → `/volume1/docker/`. Create folder `synology-nas-mcp`. Inside it, create folder `audit`. Upload three files into `synology-nas-mcp/`:
-   - The image tar from step 1 (`synology-nas-mcp-latest.tar`).
+2. Prepare the NAS directory. DSM → File Station → `/volume1/docker/`. Create folder `synology-mcp`. Inside it, create folder `audit`. Upload three files into `synology-mcp/`:
+   - The image tar from step 1 (`synology-mcp-latest.tar`).
    - `docker-compose.yml` — copy of `synology.compose.yml` from this repo, renamed.
    - `.env` — copy of `.env.example` with your real values filled in. **Set strict perms** afterwards: `chmod 600 .env` (SSH in or use a Task Scheduler one-shot script). Contains the 1Password service-account token.
 
-3. Import the image. DSM → Container Manager → **Image** → Add → Add from file → select the tar. Verify `synology-nas-mcp:latest` (and `:version`) appear.
+3. Import the image. DSM → Container Manager → **Image** → Add → Add from file → select the tar. Verify `synology-mcp:latest` (and `:version`) appear.
 
 4. Create the project. DSM → Container Manager → **Project** → **Create**:
-   - Project name: `synology-nas-mcp`
-   - Path: `/volume1/docker/synology-nas-mcp`
+   - Project name: `synology-mcp`
+   - Path: `/volume1/docker/synology-mcp`
    - Source: **Use existing docker-compose.yml**
    - Click **Next** → review → **Done**. Project will start.
 
 ### Upgrades
 
 ```sh
-container build --platform linux/amd64 -t synology-nas-mcp:<ver> .
-container image save --platform linux/amd64 synology-nas-mcp:<ver> -o /tmp/oci.tar
+container build --platform linux/amd64 -t synology-mcp:<ver> .
+container image save --platform linux/amd64 synology-mcp:<ver> -o /tmp/oci.tar
 skopeo copy --override-os linux --override-arch amd64 \
   oci-archive:/tmp/oci.tar \
-  docker-archive:~/Downloads/synology-nas-mcp-<ver>.tar:synology-nas-mcp:latest
-# then rewrite the archive's RepoTags to the bare `synology-nas-mcp` name (see the build gotcha above)
+  docker-archive:~/Downloads/synology-mcp-<ver>.tar:synology-mcp:latest
+# then rewrite the archive's RepoTags to the bare `synology-mcp` name (see the build gotcha above)
 source dev/source-creds.sh   # once per shell; reads creds from 1Password via op
 npm run deploy                # imports image → recreates project → polls /health
 ```
@@ -162,7 +162,7 @@ From a Mac on the tailnet, hit the serve URL (read the bearer via `op read "op:/
 ```sh
 TOKEN=$(op read "op://<vault>/Synology DSM/mcp_bearer_token")
 curl -i https://<your-nas>.<your-tailnet>.ts.net/health
-# expect: 200 OK {"ok":true,"server":"synology-nas-mcp","version":"..."}
+# expect: 200 OK {"ok":true,"server":"synology-mcp","version":"..."}
 
 curl -i -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
@@ -174,14 +174,14 @@ Confirm the LAN is closed: from a device that can reach the NAS's LAN IP, `curl 
 
 ## 8. Wire up the local bridge (Claude Desktop only)
 
-Claude Desktop currently only accepts stdio MCP entries, not HTTP. Install the package's `bridge` subcommand globally on your Mac — it's a 39-line stdio→HTTP proxy that lives at `/opt/homebrew/bin/synology-nas-mcp`.
+Claude Desktop currently only accepts stdio MCP entries, not HTTP. Install the package's `bridge` subcommand globally on your Mac — it's a 39-line stdio→HTTP proxy that lives at `/opt/homebrew/bin/synology-mcp`.
 
 ```sh
 cd <repo>
 npm install -g .
 ```
 
-This builds + copies the package to `/opt/homebrew/lib/node_modules/synology-nas-mcp/` (a stable snapshot — edits to the repo don't propagate until you re-run `npm install -g .`).
+This builds + copies the package to `/opt/homebrew/lib/node_modules/synology-mcp/` (a stable snapshot — edits to the repo don't propagate until you re-run `npm install -g .`).
 
 After meaningful code changes, re-run `npm install -g .` to update the global install.
 
@@ -191,7 +191,7 @@ After meaningful code changes, re-run `npm install -g .` to update the global in
 
 ```json
 "synology": {
-  "command": "/opt/homebrew/bin/synology-nas-mcp",
+  "command": "/opt/homebrew/bin/synology-mcp",
   "args": ["bridge"],
   "env": {
     "MCP_BRIDGE_URL": "https://<your-nas>.<your-tailnet>.ts.net/mcp",
@@ -213,8 +213,8 @@ Restart Claude Desktop / Claude Code. Tools `mcp__synology__*` should appear.
 To remove the integration completely:
 
 1. Remove the `synology` entry from `claude_desktop_config.json` and any Claude Code MCP registration (`claude mcp remove synology`).
-2. Container Manager → stop + delete the `synology-nas-mcp` project.
-3. `rm -rf /volume1/docker/synology-nas-mcp` (this deletes the audit log too — copy it out first if you want to keep it).
+2. Container Manager → stop + delete the `synology-mcp` project.
+3. `rm -rf /volume1/docker/synology-mcp` (this deletes the audit log too — copy it out first if you want to keep it).
 4. Tailscale ACL → remove the `:8765` rule you added.
 5. DSM → Control Panel → User & Group → delete `claude-mcp`.
 6. 1Password → delete the item and revoke the service account.
