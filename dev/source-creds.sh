@@ -31,12 +31,12 @@ unset OP_SERVICE_ACCOUNT_TOKEN
 # A local dev run writes its audit records to this per-user cache dir; the
 # production daemon writes to the NAS-mounted /audit instead, so a dev run's
 # writes don't land in the NAS's canonical trail.
-: "${AUDIT_LOG_DIR:=$HOME/.cache/synology-nas-mcp/audit}"
+: "${AUDIT_LOG_DIR:=$HOME/.cache/synology-mcp/audit}"
 # Persist the DSM SID across tsx runs so we don't burn a TOTP code each process
 # (DSM rejects TOTP reuse within the 30s window with code 404). NAS only — the
 # router (SRM) deliberately gets no SID cache; SRM expires sessions faster than
 # the client TTL, so a cached SID goes stale (119 → TOTP-reuse 404).
-: "${DSM_SID_CACHE_FILE:=$HOME/.cache/synology-nas-mcp/sid.json}"
+: "${DSM_SID_CACHE_FILE:=$HOME/.cache/synology-mcp/sid.json}"
 export DSM_OP_VAULT DSM_OP_ITEM DSM_BASE_URL DSM_USER \
        AUDIT_LOG_DIR DSM_SID_CACHE_FILE
 # Cache dir holds the SID + audit log — keep it owner-only.
