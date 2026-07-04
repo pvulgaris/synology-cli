@@ -172,22 +172,21 @@ curl -i -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 
 Confirm the LAN is closed: from a device that can reach the NAS's LAN IP, `curl http://<nas-lan-ip>:8765/health` should be **connection-refused** — the daemon binds no LAN-facing socket. (`http://<nas>:8765` over the *tailnet* still works — tailscaled forwards it to the loopback daemon — and is bearer-gated like serve.) A tailnet device not in the ACL allowlist is blocked at the ACL layer.
 
-## 8. Wire up the local bridge (Claude Desktop only)
+## 8. Local bridge (Claude Desktop only)
 
-Claude Desktop currently only accepts stdio MCP entries, not HTTP. Install the package's `bridge` subcommand globally on your Mac — it's a 39-line stdio→HTTP proxy that lives at `/opt/homebrew/bin/synology-mcp`.
+**Claude Code users skip this** — Code connects over HTTP (§9). Claude Desktop's config only accepts **stdio** servers, so it needs a local `bridge` (a tiny stdio→HTTP proxy shipped in this package):
 
 ```sh
 cd <repo>
-npm install -g .
+npm install -g .            # no Homebrew formula; installs to your npm global prefix
+command -v synology-mcp     # note this path for §9's "command"
 ```
 
-This builds + copies the package to `/opt/homebrew/lib/node_modules/synology-mcp/` (a stable snapshot — edits to the repo don't propagate until you re-run `npm install -g .`).
-
-After meaningful code changes, re-run `npm install -g .` to update the global install.
+Re-run `npm install -g .` after code changes (it's a stable snapshot — repo edits don't propagate until you do).
 
 ## 9. Wire up Claude
 
-`~/Library/Application Support/Claude/claude_desktop_config.json` — add under `mcpServers`:
+**Claude Desktop** — add under `mcpServers` in `claude_desktop_config.json` (`command` = the §8 path):
 
 ```json
 "synology": {
@@ -195,18 +194,20 @@ After meaningful code changes, re-run `npm install -g .` to update the global in
   "args": ["bridge"],
   "env": {
     "MCP_BRIDGE_URL": "https://<your-nas>.<your-tailnet>.ts.net/mcp",
-    "MCP_BRIDGE_TOKEN": "<paste bearer token here>"
+    "MCP_BRIDGE_TOKEN": "<bearer token>"
   }
 }
 ```
 
-Claude Code CLI (one Mac):
+**Claude Code** — native HTTP, no bridge (`--transport http` is required; the default is stdio):
+
 ```sh
 TOKEN=$(op read "op://<vault>/Synology DSM/mcp_bearer_token")
-claude mcp add synology https://<your-nas>.<your-tailnet>.ts.net/mcp --header "Authorization: Bearer $TOKEN"
+claude mcp add --transport http synology https://<your-nas>.<your-tailnet>.ts.net/mcp \
+  --header "Authorization: Bearer $TOKEN"
 ```
 
-Restart Claude Desktop / Claude Code. Tools `mcp__synology__*` should appear.
+Restart the client; `mcp__synology__*` tools appear.
 
 ## Uninstall, in reverse
 
