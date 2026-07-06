@@ -9,8 +9,10 @@ name: Claude Code Review
 # anthropics/claude-code#19618 and claude-code-action#1087.
 #
 # This form has no plugin and no gates. The action auto-detects automation mode
-# from the `prompt:` on a pull_request event; Claude reads the diff and posts a
-# single summary comment via `gh pr comment`. That's the whole thing — no inline
+# from the `prompt:` on a pull_request event; Claude reads the diff and, only if
+# it finds a real issue, posts one summary comment via `gh pr comment`. A clean
+# run stays silent — the passing check is the all-clear, so a clean PR doesn't
+# email you (matching Cursor Bugbot's notify-on-issue behavior). No inline
 # comments, no MCP tools — so it's easy to reason about.
 
 on:
@@ -44,8 +46,8 @@ jobs:
             `gh pr diff ${{ github.event.pull_request.number }}` and read the
             surrounding code for context. Review it even though it is Claude-authored.
 
-            Then post ONE summary comment with `gh pr comment` listing any real
-            correctness, security, or CLAUDE.md-convention issues (skip style
-            nitpicks), or exactly "No issues found. Checked for bugs and CLAUDE.md
-            compliance." if the diff is clean. Always post the comment.
+            If you find real correctness, security, or CLAUDE.md-convention
+            issues (skip style nitpicks), post ONE summary comment listing them
+            with `gh pr comment`. If the diff is clean, post nothing — the
+            passing check is the all-clear.
           claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh:*)" --max-turns 30'
