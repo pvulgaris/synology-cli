@@ -103,7 +103,7 @@ When composing security-audit output, attach a stable `id: synology.<category>.<
 | `synology.firewall.dos_off_on_adapter` | one entry per adapter with `dos_protect_enable === false` (include adapter name) |
 | `synology.dsm.https_redirect_off` | `web_hardening.https_redirect === false` |
 | `synology.dsm.hsts_off` | `web_hardening.hsts === false` |
-| `synology.dsm.tls_profile_downgraded` | any service `current-level < default-level` (include service name) |
+| `synology.dsm.tls_profile_downgraded` | any service `current-level > default-level` (TLS levels are inverse: 0=Modern/strongest, 2=Old/weakest — so a HIGHER current-level than default means weaker; include service name) |
 | `synology.dsm.default_dsm_ports` | `web_hardening.http_port === 5000` or `https_port === 5001` |
 | `synology.smb.smb1_enabled` | `smb.min_protocol === 0` (DSM enum is 0-indexed: 0=SMB1, 1=SMB2, 2=SMB2+LargeMTU, 3=SMB3 — a `min_protocol` of 1 is SMB2 and is **not** a finding) |
 | `synology.ssh.enabled` | `ssh_enabled === true` (mostly an observation; flag if Tailscale ACL isn't tight) |
