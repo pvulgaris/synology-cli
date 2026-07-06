@@ -262,7 +262,10 @@ export async function nasDsmSecuritySettings(dsm: SynoClient) {
       min_protocol: smb?.smb_min_protocol ?? null,
       max_protocol: smb?.smb_max_protocol ?? null,
       encrypt_transport: smb?.smb_encrypt_transport ?? null,
-      enable_smb1: typeof smb?.smb_min_protocol === "number" ? smb.smb_min_protocol <= 1 : null,
+      // DSM's SMB protocol enum is 0-indexed: 0=SMB1, 1=SMB2, 2=SMB2+LargeMTU, 3=SMB3.
+      // SMB1 is only permitted when the minimum is SMB1 itself, i.e. smb_min_protocol === 0.
+      // (Earlier `<= 1` mis-flagged a SMB2 minimum as SMB1 — a false-positive critical finding.)
+      enable_smb1: typeof smb?.smb_min_protocol === "number" ? smb.smb_min_protocol === 0 : null,
       workgroup: smb?.workgroup,
     },
     nfs: {
