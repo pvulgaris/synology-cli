@@ -243,8 +243,11 @@ export async function nasDsmSecuritySettings(dsm: SynoClient) {
       ip_check: security?.skip_ip_checking === false ? true : security?.skip_ip_checking === true ? false : null,
       session_timeout_min: security?.timeout ?? null,
     },
-    // TLS profile levels: 0=Compatible (weakest), 1=Intermediate, 2=Modern.
-    // `current-level` per service overrides `default-level`.
+    // TLS profile levels are INVERSELY numbered: 0=Modern (strongest), 1=Intermediate,
+    // 2=Old/Compatible (weakest). Verified against a live NAS by cipher enumeration —
+    // a service at level 0 serves only modern PFS/AEAD ciphers and rejects CBC/SHA1/3DES.
+    // So a service is DOWNGRADED (weaker) when its `current-level` is GREATER than
+    // `default-level`, not less. `current-level` per service overrides `default-level`.
     tls_profile: {
       default_level: tlsProfile?.["default-level"] ?? null,
       services: Object.fromEntries(
