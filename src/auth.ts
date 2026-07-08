@@ -9,7 +9,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { authenticator } from "otplib";
-import type { Config } from "./config.js";
+import type { TargetConfig } from "./config.js";
 
 const execFileP = promisify(execFile);
 
@@ -61,7 +61,7 @@ function assertBearer(bearerToken: string): void {
   }
 }
 
-export async function loadCredentials(cfg: Config): Promise<Credentials> {
+export async function loadCredentials(cfg: TargetConfig): Promise<Credentials> {
   // DSM login secrets (password + totp) share the env fast-path, op-read, and
   // fail-closed logic with every other target — reuse loadDsmOnlyCredentials and
   // add only the wire bearer, the one field a NAS client has that a router client

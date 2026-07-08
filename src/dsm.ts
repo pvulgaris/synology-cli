@@ -20,8 +20,8 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Config } from "./config.js";
-import { routerConfigFrom } from "./config.js";
+import type { Config, TargetConfig } from "./config.js";
+import { routerTargetFrom } from "./config.js";
 import {
   currentTotpCode,
   loadCredentials,
@@ -125,7 +125,7 @@ export interface SynoClientOptions {
   readOnly?: boolean;
   /** Override how login secrets are fetched. The router passes the bearer-free
    *  loader; default is the MCP's own `loadCredentials`. */
-  credLoader?: (cfg: Config) => Promise<DsmOnlyCredentials>;
+  credLoader?: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
 }
 
 export class SynoClient {
@@ -133,13 +133,13 @@ export class SynoClient {
   private sid: string | null = null;
   private sidObtainedAt = 0;
   private readonly readOnly: boolean;
-  private readonly credLoader: (cfg: Config) => Promise<DsmOnlyCredentials>;
+  private readonly credLoader: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
   // Concurrent ensureSession() calls share the in-flight login. Without this,
   // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
   private loginInFlight: Promise<void> | null = null;
 
-  constructor(private cfg: Config, opts: SynoClientOptions = {}) {
+  constructor(private cfg: TargetConfig, opts: SynoClientOptions = {}) {
     this.readOnly = opts.readOnly ?? false;
     this.credLoader = opts.credLoader ?? loadCredentials;
     const cachePath = this.cfg.sidCacheFile;
@@ -318,7 +318,7 @@ export class SynoClient {
  *  lives, so the daemon and the CLI can't drift. */
 export function makeRouterClient(cfg: Config): SynoClient | null {
   if (!cfg.router) return null;
-  return new SynoClient(routerConfigFrom(cfg), {
+  return new SynoClient(routerTargetFrom(cfg), {
     readOnly: true,
     credLoader: (c) => loadDsmOnlyCredentials(c.opVault, c.opItem, "SRM"),
   });

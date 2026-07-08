@@ -32,6 +32,26 @@ export interface RouterTarget {
   opItem: string;
 }
 
+/** The exact slice of Config a `SynoClient` (and its cred loader) reads to talk to
+ *  one Synology target — DSM or SRM. Every DSM↔SRM difference lives in these
+ *  fields, so "which device" is fully expressed as data of this shape rather than
+ *  as a class hierarchy or runtime branching. `Config` structurally satisfies it,
+ *  so the NAS client passes the whole Config unchanged; `routerTargetFrom` builds
+ *  the router's slice explicitly. Deliberately omits server-only fields
+ *  (bind host, origins, audit dir) and `tlsSkipVerify` — the latter is applied
+ *  process-wide at startup (cli.ts), never read through a target. */
+export type TargetConfig = Pick<
+  Config,
+  | "dsmBaseUrl"
+  | "dsmUser"
+  | "opVault"
+  | "opItem"
+  | "session"
+  | "authVersion"
+  | "authPath"
+  | "sidCacheFile"
+>;
+
 export interface Config {
   dsmBaseUrl: string;
   dsmUser: string;
@@ -127,28 +147,31 @@ function parseRouter(): RouterTarget | null {
   };
 }
 
-/** Project the main Config onto the router target: same vault/origins/audit, but
- *  the router's base URL, admin user, 1Password item, a distinct session, and NO
- *  SID cache — the router always fresh-logs-in. (A dev disk SID cache was tried and
- *  reverted: SRM expires sessions faster than the client's 10-min TTL, so a cached
- *  SID goes stale → 119 → re-login → TOTP-reuse 404. Fresh login per process is
- *  reliable; the production daemon keeps its SID warm in-memory regardless. The
- *  back-to-back-within-30s dev case just waits a TOTP window.) */
-export function routerConfigFrom(cfg: Config): Config {
+/** Build the router's target slice from the main Config: shared vault, but the
+ *  router's base URL, admin user, 1Password item, a distinct session, SRM's auth
+ *  path/version, and NO SID cache — the router always fresh-logs-in. (A dev disk
+ *  SID cache was tried and reverted: SRM expires sessions faster than the client's
+ *  10-min TTL, so a cached SID goes stale → 119 → re-login → TOTP-reuse 404. Fresh
+ *  login per process is reliable; the production daemon keeps its SID warm
+ *  in-memory regardless. The back-to-back-within-30s dev case just waits a TOTP
+ *  window.)
+ *
+ *  Returns a `TargetConfig`, not a `Config`: the projected value describes the
+ *  router *as a target*, so it structurally can't carry a `router` field —
+ *  `makeRouterClient(routerTargetFrom(cfg))` is a compile error, not a runtime
+ *  guard, and no server-only fields leak into a value that only feeds a client. */
+export function routerTargetFrom(cfg: Config): TargetConfig {
   if (!cfg.router) {
-    throw new Error("routerConfigFrom called without cfg.router");
+    throw new Error("routerTargetFrom called without cfg.router");
   }
   return {
-    ...cfg,
     dsmBaseUrl: cfg.router.baseUrl,
     dsmUser: cfg.router.user,
+    opVault: cfg.opVault,
     opItem: cfg.router.opItem,
     session: `${cfg.session}-router`,
     authVersion: 3,
     authPath: "auth.cgi",
     sidCacheFile: undefined,
-    // The projected config describes the router itself; clear `router` so a
-    // stray makeRouterClient(routerConfigFrom(cfg)) can't build a router-of-the-router.
-    router: null,
   };
 }
