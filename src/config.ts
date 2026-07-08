@@ -42,8 +42,8 @@ export interface RouterTarget {
  *  process-wide at startup (cli.ts), never read through a target. */
 export type TargetConfig = Pick<
   Config,
-  | "dsmBaseUrl"
-  | "dsmUser"
+  | "baseUrl"
+  | "user"
   | "opVault"
   | "opItem"
   | "session"
@@ -53,8 +53,11 @@ export type TargetConfig = Pick<
 >;
 
 export interface Config {
-  dsmBaseUrl: string;
-  dsmUser: string;
+  /** Base URL of the target device (the NAS for the main Config; the router for
+   *  a projected router target). Sourced from DSM_BASE_URL / SRM_BASE_URL. */
+  baseUrl: string;
+  /** Login account on the target. Sourced from DSM_USER / SRM_USER. */
+  user: string;
   opVault: string;
   opItem: string;
   mcpBindHost: string | null;
@@ -94,7 +97,7 @@ function optional(name: string, fallback: string): string {
 }
 
 export function loadConfig(): Config {
-  const dsmBaseUrl = required("DSM_BASE_URL").replace(/\/$/, "");
+  const baseUrl = required("DSM_BASE_URL").replace(/\/$/, "");
   const allowedOrigins = new Set(
     optional(
       "MCP_ALLOWED_ORIGINS",
@@ -105,8 +108,8 @@ export function loadConfig(): Config {
       .filter(Boolean)
   );
   return {
-    dsmBaseUrl,
-    dsmUser: optional("DSM_USER", "claude-mcp"),
+    baseUrl,
+    user: optional("DSM_USER", "claude-mcp"),
     opVault: required("DSM_OP_VAULT"),
     opItem: optional("DSM_OP_ITEM", "Synology DSM"),
     mcpBindHost: process.env.MCP_BIND_HOST ?? null,
@@ -165,8 +168,8 @@ export function routerTargetFrom(cfg: Config): TargetConfig {
     throw new Error("routerTargetFrom called without cfg.router");
   }
   return {
-    dsmBaseUrl: cfg.router.baseUrl,
-    dsmUser: cfg.router.user,
+    baseUrl: cfg.router.baseUrl,
+    user: cfg.router.user,
     opVault: cfg.opVault,
     opItem: cfg.router.opItem,
     session: `${cfg.session}-router`,

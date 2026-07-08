@@ -170,11 +170,11 @@ export class SynoClient {
   private async login(): Promise<void> {
     if (!this.creds) this.creds = await this.credLoader(this.cfg);
     const otpCode = currentTotpCode(this.creds.totpSecret);
-    const url = new URL(`${this.cfg.dsmBaseUrl}/webapi/${this.cfg.authPath}`);
+    const url = new URL(`${this.cfg.baseUrl}/webapi/${this.cfg.authPath}`);
     url.searchParams.set("api", "SYNO.API.Auth");
     url.searchParams.set("version", String(this.cfg.authVersion));
     url.searchParams.set("method", "login");
-    url.searchParams.set("account", this.cfg.dsmUser);
+    url.searchParams.set("account", this.cfg.user);
     url.searchParams.set("passwd", this.creds.password);
     url.searchParams.set("otp_code", otpCode);
     url.searchParams.set("format", "sid");
@@ -243,7 +243,7 @@ export class SynoClient {
   }
 
   private async callOnce<T>(opts: DsmCallOptions): Promise<T> {
-    const url = new URL(`${this.cfg.dsmBaseUrl}/webapi/entry.cgi`);
+    const url = new URL(`${this.cfg.baseUrl}/webapi/entry.cgi`);
     const body = new URLSearchParams();
     const add = (k: string, v: string | number | boolean | undefined) => {
       if (v === undefined) return;

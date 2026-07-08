@@ -27,7 +27,7 @@ async function serveStdio() {
   // undici dispatcher in v0.2.12 but it interacted badly with Node 22's
   // built-in fetch (intermittent "fetch failed" + silently-empty responses
   // on some endpoints). The blast radius of process-wide skip is bounded to
-  // DSM-shaped targets: DSM at cfg.dsmBaseUrl and, when a router is configured,
+  // DSM-shaped targets: DSM at cfg.baseUrl and, when a router is configured,
   // SRM at cfg.router.baseUrl (also self-signed). If you add a non-Synology
   // outbound, route THAT call through a per-call verifying undici Agent
   // (rejectUnauthorized:true) to override the global skip.
