@@ -161,10 +161,10 @@ async function main() {
       // Like `raw` but send the body as JSON (Content-Type: application/json).
       // DSM's SYNO.API.Info says some Package APIs use requestFormat: "JSON".
       const parsed = parseRawArgs(rest);
-      const cfg2 = (dsm as any).cfg as { dsmBaseUrl: string };
+      const cfg2 = (dsm as any).cfg as { baseUrl: string };
       await (dsm as any).ensureSession();
       const sid = (dsm as any).sid as string;
-      const url = `${cfg2.dsmBaseUrl}/webapi/entry.cgi`;
+      const url = `${cfg2.baseUrl}/webapi/entry.cgi`;
       // Coerce param values: "true"/"false"/numbers/{}/[] → JSON-typed.
       const coerced: Record<string, unknown> = {
         api: parsed.api,

@@ -61,7 +61,7 @@ function sleep(ms: number): Promise<void> {
 async function loginForDeploy(
   cfg: Config
 ): Promise<{ sid: string; synotoken: string; user: string }> {
-  const user = process.env.DSM_DEPLOY_USER ?? cfg.dsmUser;
+  const user = process.env.DSM_DEPLOY_USER ?? cfg.user;
   const password =
     process.env.DSM_DEPLOY_PASSWORD ??
     process.env.DSM_PASSWORD ??
@@ -71,7 +71,7 @@ async function loginForDeploy(
     process.env.DSM_TOTP_SECRET ??
     (await loadCredentials(cfg)).totpSecret;
   const totp = authenticator.generate(totpSecret);
-  const url = new URL(`${cfg.dsmBaseUrl}/webapi/entry.cgi`);
+  const url = new URL(`${cfg.baseUrl}/webapi/entry.cgi`);
   url.searchParams.set("api", "SYNO.API.Auth");
   url.searchParams.set("version", "6");
   url.searchParams.set("method", "login");
@@ -121,7 +121,7 @@ async function uploadImage(
   // the API name appears as a path segment after entry.cgi. The form field
   // carrying the file body is also named `filename` (DSM reuses that string
   // for both the form-data `name` and the multipart `filename` attribute).
-  const url = `${cfg.dsmBaseUrl}/webapi/entry.cgi/SYNO.Docker.Image?api=SYNO.Docker.Image&method=upload&version=1`;
+  const url = `${cfg.baseUrl}/webapi/entry.cgi/SYNO.Docker.Image?api=SYNO.Docker.Image&method=upload&version=1`;
   log(`uploading + importing ${filename} (${(st.size / 1024 / 1024).toFixed(1)} MB)…`);
   const args = [
     ...curlBase(cfg),
@@ -158,7 +158,7 @@ async function dsmCallWithToken<T = any>(
   auth: { sid: string; synotoken: string },
   opts: { api: string; method: string; version: number; params?: Record<string, string> }
 ): Promise<T> {
-  const url = new URL(`${cfg.dsmBaseUrl}/webapi/entry.cgi`);
+  const url = new URL(`${cfg.baseUrl}/webapi/entry.cgi`);
   url.searchParams.set("_sid", auth.sid);
   if (auth.synotoken) url.searchParams.set("SynoToken", auth.synotoken);
   const args: string[] = [...curlBase(cfg), "-X", "POST", url.toString()];
@@ -261,7 +261,7 @@ async function pollHealth(
   // endpoint. Bearer not required for /health.
   const url =
     process.env.MCP_HEALTH_URL ??
-    `http://${new URL(cfg.dsmBaseUrl).hostname}:${port}/health`;
+    `http://${new URL(cfg.baseUrl).hostname}:${port}/health`;
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   let lastErr: string | undefined;
   while (Date.now() < deadline) {
