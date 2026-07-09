@@ -12,6 +12,7 @@ import { loadConfig } from "../config.js";
 import { SynoClient, makeRouterClient } from "../dsm.js";
 import { nasStatus, nasStorageHealth } from "../tools/system.js";
 import { nasHyperbackupTasks, nasShareSnapshots } from "../tools/backup.js";
+import { nasTaskschedulerList } from "../tools/scheduler.js";
 import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "../tools/updates.js";
 import { routerSrmOsCheckUpdate } from "../tools/router.js";
 import { nasSharesList } from "../tools/shares.js";
@@ -35,6 +36,7 @@ const SUITE: Record<string, (dsm: SynoClient) => Promise<unknown>> = {
   nas_hyperbackup_tasks: nasHyperbackupTasks,
   nas_share_snapshots: (dsm) =>
     nasShareSnapshots(dsm, { share: process.env.VERIFY_SNAPSHOT_SHARE || "backups" }),
+  nas_taskscheduler_list: nasTaskschedulerList,
   nas_shares_list: nasSharesList,
   nas_packages_list: nasPackagesList,
   nas_packages_check_updates: nasPackagesCheckUpdates,
@@ -88,6 +90,14 @@ const ASSERTIONS: Record<string, (out: any) => string | null> = {
       return "is_c2 not populated (target_type missing?)";
     if (!o.tasks.some((t: any) => t.schedule?.time || t.last_result != null))
       return "no task has schedule or last_result (status additional[] not unpacked?)";
+    return null;
+  },
+  nas_taskscheduler_list: (o) => {
+    if (!Array.isArray(o.tasks) || o.tasks.length === 0) return "no scheduled tasks";
+    if (!o.tasks.every((t: any) => typeof t.enabled === "boolean"))
+      return "enabled not populated";
+    if (!o.tasks.some((t: any) => t.schedule?.time || t.next_run != null))
+      return "no task has a schedule time or next_run (get detail not unpacked?)";
     return null;
   },
   nas_share_snapshots: (o) => {
