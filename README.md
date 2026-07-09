@@ -20,7 +20,23 @@ This server:
 - Binds its HTTP endpoint to the `tailscale0` interface only — not LAN-reachable.
 - Logs every mutating call to a local JSONL audit file.
 
-Setup steps are in [`docs/SETUP.md`](docs/SETUP.md). Each step is discrete; uninstall reverses them in order.
+## Install
+
+One command from your Mac (the container runs on the NAS):
+
+```sh
+npx synology-mcp install --nas https://<nas>:5001
+```
+
+It prompts (no-echo) for the DSM `claude-mcp` password + TOTP **seed** — or reads them from `DSM_PASSWORD`/`DSM_TOTP_SECRET` — **validates them with a live login**, generates the wire bearer, and provisions everything over the DSM API (secret files streamed via stdin, compose, image, project), then prints the `claude mcp add` line. No File Station clicks, no SSH.
+
+- **Using a secret manager?** Run it under `op run` (or the equivalent) so the plaintext stays in RAM — e.g. `op run -- npx synology-mcp install --nas https://<nas>:5001` with `DSM_PASSWORD`/`DSM_TOTP_SECRET` set to `op://…` refs.
+- `--tar <path>` — use a locally built image tar instead of downloading the release asset (offline / maintainer builds).
+- `synology-mcp update` — pull a newer version to an existing install. Re-auths the same way (env or prompt; needs only password + TOTP, no bearer).
+
+> **Run install from a trusted network** — the NAS's LAN, or over Tailscale. DSM ships a self-signed cert, so the installer skips TLS verification for the NAS and can't detect a man-in-the-middle; it transmits the DSM password + TOTP **seed** to the NAS during install, so on a hostile network an active MITM could capture durable admin credentials. (The downloaded image itself is fetched from GitHub over verified TLS and checked against a published sha256.) Re-running `install` mints a **new** bearer — already-wired clients keep working only after you update their header; use `update` to ship a new image without rotating the bearer.
+
+One-time DSM UI prereq: install Container Manager + Tailscale from Package Center and create the `claude-mcp` admin user with 2FA (DSM's API can't enroll 2FA). Full setup and the credential options are in [`docs/SETUP.md`](docs/SETUP.md).
 
 ## Footprint
 
