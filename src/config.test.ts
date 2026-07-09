@@ -29,7 +29,7 @@ function withEnv(env: Record<string, string | undefined>, fn: () => void): void 
   }
 }
 
-const BASE = { DSM_BASE_URL: "https://nas.test:5001", DSM_OP_VAULT: "TestVault" };
+const BASE = { DSM_BASE_URL: "https://nas.test:5001" };
 const ROUTER = { ...BASE, SRM_BASE_URL: "https://router.test:8001" };
 
 test("router: empty SRM_USER (compose ${SRM_USER:-}) falls back to claude-mcp", () => {
