@@ -33,7 +33,7 @@ import {
   nasPackageInfo,
   nasPackageUpdate,
 } from "../tools/packages.js";
-import { deploy } from "./deploy.js";
+import { deploy } from "../provision.js";
 
 function parseRawArgs(args: string[]): {
   api: string;
