@@ -4,9 +4,8 @@
  * touching the MCP transport or the container. Use this to iterate on the
  * package-upgrade flow against nas.local:5001 over Tailscale.
  *
- *   DSM_BASE_URL=https://nas.local:5001 \
- *   DSM_OP_VAULT=your-1password-vault DSM_OP_ITEM='Synology DSM' \
- *   DEBUG_DSM_RESPONSES=1 \
+ *   source dev/source-creds.sh   # exports DSM_PASSWORD / DSM_TOTP_SECRET (+ bearer)
+ *   DSM_BASE_URL=https://nas.local:5001 DEBUG_DSM_RESPONSES=1 \
  *   npx tsx src/dev/runner.ts <subcommand> [args]
  *
  * Subcommands:

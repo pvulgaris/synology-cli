@@ -15,18 +15,21 @@
  * engineered from a DevTools capture. Don't confuse it with `entry.cgi`'s
  * normal form-encoded API surface.
  *
- * Auth: standard claude-mcp login via dev/source-creds.sh. No FileStation
- * permission required — Image.upload's chunked-upload path bypasses the
- * shared-folder ACL entirely. Override the deploy identity with DSM_DEPLOY_*
- * env vars if you want a separate admin account.
+ * Auth: standard claude-mcp login. The install-or-update flow uses the
+ * SYNO.FileStation.* API (CreateFolder/List/Upload) to sync the compose and
+ * provision the project dir — claude-mcp is an `administrators`-group account,
+ * which has File Station access regardless of the "Application Privileges" page
+ * (that denial doesn't bind admins; verified live). Override the deploy identity
+ * with DSM_DEPLOY_* env vars for a separate admin account.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { tmpdir } from "node:os";
 import { authenticator } from "otplib";
-import type { Config } from "../config.js";
-import { loadCredentials } from "../auth.js";
+import { type Config, envValue } from "../config.js";
+import { loadDsmOnlyCredentials, credsFromPrefix } from "../auth.js";
 
 const execFileP = promisify(execFile);
 
@@ -61,27 +64,32 @@ function sleep(ms: number): Promise<void> {
 async function loginForDeploy(
   cfg: Config
 ): Promise<{ sid: string; synotoken: string; user: string }> {
-  const user = process.env.DSM_DEPLOY_USER ?? cfg.user;
-  const password =
-    process.env.DSM_DEPLOY_PASSWORD ??
-    process.env.DSM_PASSWORD ??
-    (await loadCredentials(cfg)).password;
-  const totpSecret =
-    process.env.DSM_DEPLOY_TOTP_SECRET ??
-    process.env.DSM_TOTP_SECRET ??
-    (await loadCredentials(cfg)).totpSecret;
+  // Deploy needs only password + TOTP (no bearer). An explicit DSM_DEPLOY_* pair (env
+  // or *_FILE) wins; else the runtime DSM_* login secrets (bearer-free). credsFromPrefix
+  // fails loud on a half-set pair or a misconfig — it never silently mixes a
+  // DSM_DEPLOY_USER with the runtime DSM_* password.
+  const user = envValue("DSM_DEPLOY_USER") ?? cfg.user;
+  const { password, totpSecret } =
+    credsFromPrefix("DSM_DEPLOY") ?? (await loadDsmOnlyCredentials("DSM"));
   const totp = authenticator.generate(totpSecret);
-  const url = new URL(`${cfg.baseUrl}/webapi/entry.cgi`);
-  url.searchParams.set("api", "SYNO.API.Auth");
-  url.searchParams.set("version", "6");
-  url.searchParams.set("method", "login");
-  url.searchParams.set("account", user);
-  url.searchParams.set("passwd", password);
-  url.searchParams.set("otp_code", totp);
-  url.searchParams.set("format", "sid");
-  url.searchParams.set("session", "synology-mcp-deploy");
-  url.searchParams.set("enable_syno_token", "yes");
-  const res = await fetch(url, { method: "GET" });
+  // POST with credentials in the form BODY, never the URL query string — DSM access
+  // logs and any proxy record request URLs, not bodies.
+  const form = new URLSearchParams({
+    api: "SYNO.API.Auth",
+    version: "6",
+    method: "login",
+    account: user,
+    passwd: password,
+    otp_code: totp,
+    format: "sid",
+    session: "synology-mcp-deploy",
+    enable_syno_token: "yes",
+  });
+  const res = await fetch(`${cfg.baseUrl}/webapi/entry.cgi`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form,
+  });
   const body = (await res.json()) as any;
   if (!body?.success) {
     const code = body?.error?.code ?? -1;
@@ -201,13 +209,13 @@ async function dsmCallWithToken<T = any>(
   return body.data as T;
 }
 
-/** Look up the Compose project by name. Returns id + current status so the
- *  caller knows whether `start` is needed after `build`. */
+/** Look up the Compose project by name. Returns id + current status, or null when
+ *  it doesn't exist yet (first install — the caller then creates it). */
 async function findProject(
   cfg: Config,
   auth: { sid: string; synotoken: string },
   projectName: string
-): Promise<{ id: string; status: string }> {
+): Promise<{ id: string; status: string } | null> {
   const list = await dsmCallWithToken<any>(cfg, auth, {
     api: "SYNO.Docker.Project",
     method: "list",
@@ -220,45 +228,187 @@ async function findProject(
     list
   ).map((v: any) => ({ id: v.id, name: v.name, status: v.status }));
   const match = entries.find((e) => e.name === projectName);
-  if (!match) {
-    const names = entries.map((e) => e.name).join(", ") || "<none>";
-    throw new Error(`Compose project '${projectName}' not found. Existing: ${names}`);
-  }
+  if (!match) return null;
   log(`project ${projectName} → uuid=${match.id} status=${match.status}`);
   return { id: match.id, status: match.status };
 }
 
-/** Recycle the Compose project to pick up the new :latest image. `Project.build`
- *  by itself recreates containers (which atomically stops + replaces + starts
- *  if the project was running), so we skip the explicit stop call — each stop
- *  spawns a "Critical: Container stopped unexpectedly" notification in DSM,
- *  and one per deploy adds up fast during iteration.
+/** The repo's canonical compose, synced to the NAS project dir on every deploy so
+ *  compose changes ship with the tool (the operator never hand-edits it). */
+async function repoComposeContent(): Promise<string> {
+  return readFile(
+    join(new URL(import.meta.url).pathname, "..", "..", "..", "synology.compose.yml"),
+    "utf8"
+  );
+}
+
+/** Ensure /docker/<projectName> exists (idempotent — ignore "already exists"). */
+async function ensureProjectDir(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  projectName: string
+): Promise<void> {
+  await dsmCallWithToken(cfg, auth, {
+    api: "SYNO.FileStation.CreateFolder",
+    method: "create",
+    version: 2,
+    params: { folder_path: "/docker", name: projectName, force_parent: "true" },
+  }).catch((e: any) => {
+    // Usually just "already exists" — fine. Surface anything else (permission / share
+    // error) so it isn't silent; a real failure still resurfaces at the create/upload
+    // below, but with a clear breadcrumb here.
+    log(`CreateFolder ${projectName}: ${e?.message ?? e} (continuing)`);
+  });
+}
+
+/** Upload a small text file into a File Station folder (create_parents + overwrite).
+ *  curl -F like uploadImage; content rides a temp file. */
+async function uploadText(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  folderPath: string,
+  filename: string,
+  content: string
+): Promise<void> {
+  // Unique temp dir per call (no fixed-path collision between concurrent deploys),
+  // and the write is inside the try so a partial write is still cleaned up. Mode
+  // 0600 in case this helper is later reused for secret content.
+  const dir = await mkdtemp(join(tmpdir(), "synmcp-deploy-"));
+  const tmp = join(dir, filename);
+  try {
+    await writeFile(tmp, content, { mode: 0o600 });
+    const url = entryCgiUrl(cfg, auth, {
+      api: "SYNO.FileStation.Upload",
+      version: "2",
+      method: "upload",
+    });
+    const args = [
+      ...curlBase(cfg),
+      "-X", "POST", url,
+      "-H", `X-SYNO-TOKEN: ${auth.synotoken}`,
+      "-F", `path=${folderPath}`,
+      "-F", "create_parents=true",
+      "-F", "overwrite=true",
+      "-F", `file=@${tmp};filename=${filename}`,
+    ];
+    const { stdout } = await execFileP("curl", args, { maxBuffer: 1024 * 1024 });
+    let body: any;
+    try {
+      body = JSON.parse(stdout);
+    } catch {
+      throw new Error(`FileStation.Upload returned non-JSON: ${stdout.slice(0, 200)}`);
+    }
+    if (!body?.success) {
+      throw new Error(`FileStation.Upload ${filename} failed (code ${body?.error?.code})`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** The compose filename the project dir already uses, so an update overwrites the
+ *  single existing file rather than adding a second one (two compose files jam
+ *  Container Manager's worker — hard-won). We don't pick the name — DSM's
+ *  Project.create writes the compose and names it — so match ANY single YAML rather
+ *  than a fixed list. Errors if more than one is present. */
+async function existingComposeName(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  dir: string
+): Promise<string> {
+  // A real list error propagates (aborts the deploy) — guessing on a transient
+  // failure could upload a SECOND compose file, which jams the compose worker.
+  const listing = await dsmCallWithToken<any>(cfg, auth, {
+    api: "SYNO.FileStation.List",
+    method: "list",
+    version: 2,
+    params: { folder_path: dir },
+  });
+  const names: string[] = (listing?.files ?? []).map((f: any) => f.name);
+  // Any single YAML in the project dir IS the compose, whatever CM named it on create.
+  const present = names.filter((n) => /\.ya?ml$/i.test(n));
+  // >1 is ambiguous — don't guess which one CM uses (overwriting the wrong one leaves
+  // stale compose + a second file). Bail.
+  if (present.length > 1) {
+    throw new Error(
+      `project dir has multiple YAML files (${present.join(", ")}); remove the extras so ` +
+        `one compose file remains, then redeploy — Container Manager jams on two.`
+    );
+  }
+  // Overwrite the single existing file (whatever its name); default compose.yaml for a
+  // fresh/empty dir.
+  return present[0] ?? "compose.yaml";
+}
+
+/** Create the Compose project from the synced compose (first install). Returns id.
+ *  Shape reverse-engineered live: {name, share_path:/docker/<name>, content}. */
+async function createProject(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  projectName: string,
+  shareDir: string,
+  content: string
+): Promise<string> {
+  const data = await dsmCallWithToken<any>(cfg, auth, {
+    api: "SYNO.Docker.Project",
+    method: "create",
+    version: 1,
+    params: { name: projectName, share_path: shareDir, content },
+  });
+  if (!data?.id) {
+    throw new Error(`Project.create returned no id: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  log(`created project ${projectName} → uuid=${data.id}`);
+  return data.id;
+}
+
+/** Recycle the Compose project to pick up the new :latest image, quietly:
+ *  stop (if running) → build → start.
  *
- *  If the project was already STOPPED before we got here (rare, but happens
- *  after a previous deploy that failed mid-flight), build alone won't start
- *  it, so we follow up with start. From RUNNING this is a no-op. */
+ *  Why stop first: DSM's ContainerManager watcher emails a Critical
+ *  "Container stopped unexpectedly" (`docker_container_unexpected_exit`)
+ *  whenever a *running* container dies without CM having registered the stop as
+ *  intentional. `Project.build` recreates-while-running — it kills the live
+ *  container at the docker level — which reads as a crash, one email per deploy.
+ *  An API-initiated `Project.stop` IS registered as intentional and stays
+ *  silent, so stopping first means `build` recreates from cold (no live
+ *  container dies, no event). The earlier "skip the stop to avoid the
+ *  notification" comment had it exactly backwards — it was never A/B'd. `start`
+ *  is unconditional (build from a stopped project doesn't reliably auto-start;
+ *  starting an already-up project is a harmless no-op). */
 async function rebuildProject(
   cfg: Config,
   auth: { sid: string; synotoken: string },
   projectId: string,
   initialStatus: string
 ): Promise<void> {
-  log(`building project (recreates containers with new :latest)…`);
+  // Stop unless the project is already definitively stopped. Testing for any
+  // live-ish state (RUNNING/STARTING/…) rather than == "RUNNING" so a transitional
+  // status still gets the intentional stop — else build recreates a live container
+  // and DSM fires "stopped unexpectedly".
+  if (!["STOPPED", "CREATED"].includes(initialStatus)) {
+    log(`stopping project (CM-registered shutdown — no "stopped unexpectedly" alert)…`);
+    await dsmCallWithToken(cfg, auth, {
+      api: "SYNO.Docker.Project",
+      method: "stop",
+      version: 1,
+      params: { id: projectId },
+    });
+  }
+  log(`building project (recreates containers from cold with new :latest)…`);
   await dsmCallWithToken(cfg, auth, {
     api: "SYNO.Docker.Project",
     method: "build",
     version: 1,
     params: { id: projectId },
   });
-  if (initialStatus !== "RUNNING") {
-    log(`project was ${initialStatus}; explicit start to bring it up…`);
-    await dsmCallWithToken(cfg, auth, {
-      api: "SYNO.Docker.Project",
-      method: "start",
-      version: 1,
-      params: { id: projectId },
-    });
-  }
+  log(`starting project…`);
+  await dsmCallWithToken(cfg, auth, {
+    api: "SYNO.Docker.Project",
+    method: "start",
+    version: 1,
+    params: { id: projectId },
+  });
 }
 
 /** Poll the daemon's /health until it reports the version we just shipped. */
@@ -294,7 +444,12 @@ async function pollHealth(
     }
     await sleep(POLL_INTERVAL_MS);
   }
-  throw new Error(`/health never reported ${expectedVersion} within ${POLL_TIMEOUT_MS / 1000}s; last=${lastErr}`);
+  throw new Error(
+    `/health never reported ${expectedVersion} within ${POLL_TIMEOUT_MS / 1000}s (${url}); ` +
+      `last=${lastErr}. If the daemon binds loopback (MCP_BIND_HOST=127.0.0.1, the default) ` +
+      `it isn't reachable at the NAS's LAN/tailnet IP:${port} unless tailscaled forwards it — ` +
+      `set MCP_HEALTH_URL to the tailscale-serve endpoint (e.g. https://<nas>.<tailnet>.ts.net/health).`
+  );
 }
 
 export async function deploy(cfg: Config, args: DeployArgs): Promise<DeployResult> {
@@ -329,11 +484,34 @@ export async function deploy(cfg: Config, args: DeployArgs): Promise<DeployResul
   // 1. Upload + import (one call via the chunked-upload URL)
   await uploadImage(cfg, auth, tarPath);
 
-  // 2. Restart project
-  const { id: projectId, status } = await findProject(cfg, auth, projectName);
-  await rebuildProject(cfg, auth, projectId, status);
+  // 2. Install-or-update: sync the compose, creating the project on first install.
+  //    Secrets (the 3 files in ./secrets) stay operator-owned and are never touched
+  //    here — the daemon reads them read-only.
+  const composeContent = await repoComposeContent();
+  const projDir = `/docker/${projectName}`;
+  const existing = await findProject(cfg, auth, projectName);
+  let projectId: string;
+  let status: string;
+  if (existing) {
+    const composeName = await existingComposeName(cfg, auth, projDir);
+    await uploadText(cfg, auth, projDir, composeName, composeContent);
+    log(`synced ${composeName} → existing project`);
+    projectId = existing.id;
+    status = existing.status;
+  } else {
+    log(`project '${projectName}' not found — first install, creating it`);
+    await ensureProjectDir(cfg, auth, projectName);
+    projectId = await createProject(cfg, auth, projectName, projDir, composeContent);
+    // Re-read the authoritative status rather than assume CREATED — if a DSM build
+    // leaves create RUNNING, rebuildProject must still stop it first (skipping the
+    // stop on a live container fires the "stopped unexpectedly" alert we avoid).
+    status = (await findProject(cfg, auth, projectName))?.status ?? "CREATED";
+  }
 
-  // 3. Verify
+  // 3. Rebuild (picks up new compose + image). No auto-rollback: the synced compose is
+  //    the tool's own tested file, so a build failure is an image/DSM problem a compose
+  //    restore wouldn't fix. Let the error bubble up — the caller decides what to do.
+  await rebuildProject(cfg, auth, projectId, status);
   const healthVersion = await pollHealth(cfg, expectedVersion, healthPort);
 
   return {
