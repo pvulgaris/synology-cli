@@ -59,7 +59,7 @@ function resolveBindHost(cfg: Config): string {
 export async function startHttpDaemon(
   cfg: Config
 ): Promise<{ host: string; port: number }> {
-  const creds = await loadCredentials(cfg);
+  const creds = await loadCredentials();
   const expected = `Bearer ${creds.bearerToken}`;
   const host = resolveBindHost(cfg);
   const port = cfg.mcpBindPort;

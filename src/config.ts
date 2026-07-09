@@ -1,11 +1,15 @@
 /**
- * Server config from env. All secrets are fetched separately via auth.ts (`op` CLI).
+ * Server config from env. Secrets themselves are resolved separately in auth.ts
+ * (from `<NAME>_FILE`, a direct env var, or `op` — see its header).
  *
  * Required:
  *   DSM_BASE_URL          e.g. https://localhost:5001 (in-container) or https://nas.local:5001 (laptop dev)
- *   DSM_OP_VAULT          1Password vault name holding the "Synology DSM" item
- *   DSM_OP_ITEM           1Password item name (default: "Synology DSM")
  *   DSM_USER              DSM account name (default: "claude-mcp")
+ *
+ * Secrets (password, TOTP seed, wire bearer) are resolved in auth.ts from
+ * `<NAME>_FILE` or a direct env var — populate them however you like (write a
+ * file, export the env, or fill it at launch with `op run` / sops). No built-in
+ * secret-manager dependency.
  *
  * Optional:
  *   MCP_BIND_HOST         interface to bind HTTP transport (daemon mode); default: tailscale0 IP
@@ -17,7 +21,7 @@
  * Optional — router (SRM) target, all back-compat (unset = NAS-only):
  *   SRM_BASE_URL       e.g. https://router.local:8001 (presence alone enables the router)
  *   SRM_USER           dedicated SRM admin account name (default: "claude-mcp", read-only usage)
- *   SRM_OP_ITEM        1Password item holding router password+totp (default: "Synology SRM")
+ *   SRM_PASSWORD / SRM_TOTP_SECRET (or *_FILE)  router login secrets
  */
 
 /** Optional second target: the Synology router (SRM). SRM speaks the same
@@ -29,7 +33,6 @@
 export interface RouterTarget {
   baseUrl: string;
   user: string;
-  opItem: string;
 }
 
 /** The exact slice of Config a `SynoClient` (and its cred loader) reads to talk to
@@ -44,8 +47,6 @@ export type TargetConfig = Pick<
   Config,
   | "baseUrl"
   | "user"
-  | "opVault"
-  | "opItem"
   | "session"
   | "authVersion"
   | "authPath"
@@ -58,8 +59,6 @@ export interface Config {
   baseUrl: string;
   /** Login account on the target. Sourced from DSM_USER / SRM_USER. */
   user: string;
-  opVault: string;
-  opItem: string;
   mcpBindHost: string | null;
   mcpBindPort: number;
   allowedOrigins: Set<string>;
@@ -96,6 +95,14 @@ function optional(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
+/** Read an env var where empty/whitespace means UNSET — returns the trimmed value
+ *  or undefined. One place for the "a blank override falls through to the next
+ *  source" rule (used by the deploy login), instead of re-deriving it inline. */
+export function envValue(name: string): string | undefined {
+  const v = process.env[name];
+  return v && v.trim() ? v.trim() : undefined;
+}
+
 export function loadConfig(): Config {
   const baseUrl = required("DSM_BASE_URL").replace(/\/$/, "");
   const allowedOrigins = new Set(
@@ -110,8 +117,6 @@ export function loadConfig(): Config {
   return {
     baseUrl,
     user: optional("DSM_USER", "claude-mcp"),
-    opVault: required("DSM_OP_VAULT"),
-    opItem: optional("DSM_OP_ITEM", "Synology DSM"),
     mcpBindHost: process.env.MCP_BIND_HOST ?? null,
     mcpBindPort: parseInt(optional("MCP_BIND_PORT", "8765"), 10),
     allowedOrigins,
@@ -129,8 +134,8 @@ export function loadConfig(): Config {
 }
 
 /** Read the optional router target. Presence of SRM_BASE_URL alone gates it;
- *  SRM_USER and SRM_OP_ITEM default to the dedicated-claude-mcp convention
- *  (see RouterTarget). SRM_USER must NOT be required() here: parseRouter runs
+ *  SRM_USER defaults to the dedicated-claude-mcp convention (see RouterTarget).
+ *  SRM_USER must NOT be required() here: parseRouter runs
  *  inside loadConfig, so a missing required env would throw and take down the
  *  entire NAS daemon at boot — not just the optional router. */
 function parseRouter(): RouterTarget | null {
@@ -143,16 +148,12 @@ function parseRouter(): RouterTarget | null {
     // absent — `??` would keep "" and log in with account="". Fall back (and
     // trim) so the dedicated-admin default actually applies in the Docker path.
     user: process.env.SRM_USER?.trim() || "claude-mcp",
-    // Same empty-string hardening as SRM_USER: `${SRM_OP_ITEM:-}` in the
-    // compose injects "" (not unset) when the host var is absent; optional()'s
-    // `??` would keep it and build `op://vault//field`. Trim + fall back.
-    opItem: process.env.SRM_OP_ITEM?.trim() || "Synology SRM",
   };
 }
 
-/** Build the router's target slice from the main Config: shared vault, but the
- *  router's base URL, admin user, 1Password item, a distinct session, SRM's auth
- *  path/version, and NO SID cache — the router always fresh-logs-in. (A dev disk
+/** Build the router's target slice from the main Config: the router's base URL,
+ *  admin user, a distinct session, SRM's auth path/version, and NO SID cache — the
+ *  router always fresh-logs-in. (A dev disk
  *  SID cache was tried and reverted: SRM expires sessions faster than the client's
  *  10-min TTL, so a cached SID goes stale → 119 → re-login → TOTP-reuse 404. Fresh
  *  login per process is reliable; the production daemon keeps its SID warm
@@ -170,8 +171,6 @@ export function routerTargetFrom(cfg: Config): TargetConfig {
   return {
     baseUrl: cfg.router.baseUrl,
     user: cfg.router.user,
-    opVault: cfg.opVault,
-    opItem: cfg.router.opItem,
     session: `${cfg.session}-router`,
     authVersion: 3,
     authPath: "auth.cgi",

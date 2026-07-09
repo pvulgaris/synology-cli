@@ -200,7 +200,7 @@ export class SynoClient {
         "login",
         code,
         body.error?.errors,
-        `DSM login failed (code ${code}). Confirm the DSM user exists, has 2FA on, and that the 1Password item fields match.`
+        `DSM login failed (code ${code}). Confirm the DSM user exists, has 2FA on, and that the password + TOTP seed (env / *_FILE) are correct.`
       );
     }
     this.sid = body.data.sid;
@@ -320,6 +320,6 @@ export function makeRouterClient(cfg: Config): SynoClient | null {
   if (!cfg.router) return null;
   return new SynoClient(routerTargetFrom(cfg), {
     readOnly: true,
-    credLoader: (c) => loadDsmOnlyCredentials(c.opVault, c.opItem, "SRM"),
+    credLoader: () => loadDsmOnlyCredentials("SRM"),
   });
 }

@@ -4,7 +4,7 @@ Onboarding for a future Claude session (or any human collaborator). What's here 
 
 ## What this is, in a paragraph
 
-A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (packages, security audit, shares, storage health, users, firewall, DSM hardening, external access, notifications, certificates, data protection) so an AI agent can manage the NAS. It deploys as a Docker container *on the NAS itself* (Container Manager → Project), bound to the Tailscale interface, with bearer-token + Origin auth on the HTTP endpoint. Auth to DSM is a dedicated `claude-mcp` user (`administrators` group, 2FA TOTP, no shared-folder access), credentials read at boot from 1Password via the `op` CLI. Claude Code talks to it natively over HTTP; Claude Desktop (which only accepts stdio MCP entries) talks to it via a thin stdio→HTTP bridge running locally on the user's Mac.
+A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (packages, security audit, shares, storage health, users, firewall, DSM hardening, external access, notifications, certificates, data protection) so an AI agent can manage the NAS. It deploys as a Docker container *on the NAS itself* (Container Manager → Project), bound to the Tailscale interface, with bearer-token + Origin auth on the HTTP endpoint. Auth to DSM is a dedicated `claude-mcp` user (`administrators` group, 2FA TOTP; admins have File Station/share access regardless), credentials read at boot from bind-mounted `*_FILE` secrets or direct env vars — no built-in secret-manager dependency (populate them however you like: a file, env, or `op run`/sops at launch). Claude Code talks to it natively over HTTP; Claude Desktop (which only accepts stdio MCP entries) talks to it via a thin stdio→HTTP bridge running locally on the user's Mac.
 
 ```
    Claude Desktop ──┐                                      ┌── NAS ─────────────────┐
@@ -18,7 +18,7 @@ A small MCP server that exposes a typed subset of the Synology DSM 7 Web API (pa
                                                             │            │            │
                                                             │            ▼            │
                                                             │   localhost DSM API     │
-                                                            │   (op-fetched creds)    │
+                                                            │  (*_FILE / env creds)   │
                                                             └─────────────────────────┘
 ```
 
@@ -63,7 +63,7 @@ skopeo copy --override-os linux --override-arch amd64 \
 #    The image name MUST be `synology-mcp` (what synology.compose.yml's `image:` pulls
 #    and what the live Container Manager project expects)
 
-source dev/source-creds.sh   # once per shell; reads creds from 1Password via op
+source dev/source-creds.sh   # once per shell; exports DSM_PASSWORD/DSM_TOTP_SECRET for the deploy
 npm run deploy                # upload+import+build(recreates from new :latest)+/health-verify
 ```
 
@@ -106,7 +106,7 @@ When bumping the version, only update `package.json` — `src/version.ts` reads 
 The MCP also targets the Synology **router** (SRM) and exposes on-demand update-detection tools across both devices. (An earlier branch grew a *scheduled* checker + email alerter — an Active Insight replacement — but that automation was deliberately removed; what remains is read-only and invoked on demand. No scheduler, no email, no `NOTIFY_*` config. If you want periodic checks, run a tool or an external cron job.)
 
 - **Detection tools** (read-only, in `tools/updates.ts` + `tools/router.ts`): `nas_dsm_os_check_update` (`SYNO.Core.Upgrade.Server check` v1 — *synchronous*, no poll), `router_srm_os_check_update`, and the aggregator `synology_update_digest` (fans out to all four sources — `nas_os`, `nas_packages`, `router_os`, `router_packages` — via per-source catch so one device down never aborts the rest). There is deliberately **no** standalone `router_packages_check_updates` tool: SRM exposes no package-update API (`SYNO.Core.Package.Server` 103s), so router-package state would be nothing but the no-API note; the digest's `router_packages` source carries that note in context instead. `routerPackagesCheckUpdates` survives only as that digest-internal probe. OS detection is **detect-only**; applying DSM/SRM updates stays deferred (brick risk). `mapOsUpdate` only reports `available:true` when a concrete version is named — bias to silence over crying wolf.
-- **Router target** (`config.ts` `RouterTarget` + `routerTargetFrom`, `dsm.ts` `makeRouterClient`): a *second* `SynoClient` at `https://<router>:8001`, built **read-only** (`SynoClient` `readOnly` mode refuses any POST / non-read method). "DSM vs SRM" is expressed entirely as data of type `TargetConfig` (`config.ts`) — the 8-field slice of `Config` a `SynoClient` actually reads (base URL, user, vault/item, session, auth path/version, SID cache). `SynoClient` takes a `TargetConfig`, not a `Config`; the NAS client passes the whole `Config` (which structurally satisfies it) and `routerTargetFrom` builds the router's slice. Because `TargetConfig` has no `router` field, `makeRouterClient(routerTargetFrom(cfg))` is a **compile error**, not a runtime guard — no router-of-the-router, no server-only fields leaking into a client-only value. The package/upgrade APIs are admin-gated (no selective grant, like DSM), so it logs in as a **dedicated SRM admin** — SRM *does* support extra admins (Control Panel → User → "Grant administrator privilege"; the old `aerialls/synology-srm` "primary admin only" note is pre-1.3), so use a dedicated `claude-mcp`-style account, not the primary login (`loadDsmOnlyCredentials`, bearer-free; 2FA; 1Password only). Per-instance `session` + no SID cache (fresh login per process; a dev disk cache was tried and reverted — SRM expires sessions faster than the 10-min client TTL, so a cached SID goes stale → 119 → TOTP-reuse 404). Read tools are token-free (no `X-SYNO-TOKEN`); a future mutating router path would fetch the token via its own request.
+- **Router target** (`config.ts` `RouterTarget` + `routerTargetFrom`, `dsm.ts` `makeRouterClient`): a *second* `SynoClient` at `https://<router>:8001`, built **read-only** (`SynoClient` `readOnly` mode refuses any POST / non-read method). "DSM vs SRM" is expressed entirely as data of type `TargetConfig` (`config.ts`) — the 6-field slice of `Config` a `SynoClient` actually reads (base URL, user, session, auth path/version, SID cache). `SynoClient` takes a `TargetConfig`, not a `Config`; the NAS client passes the whole `Config` (which structurally satisfies it) and `routerTargetFrom` builds the router's slice. Because `TargetConfig` has no `router` field, `makeRouterClient(routerTargetFrom(cfg))` is a **compile error**, not a runtime guard — no router-of-the-router, no server-only fields leaking into a client-only value. The package/upgrade APIs are admin-gated (no selective grant, like DSM), so it logs in as a **dedicated SRM admin** — SRM *does* support extra admins (Control Panel → User → "Grant administrator privilege"; the old `aerialls/synology-srm` "primary admin only" note is pre-1.3), so use a dedicated `claude-mcp`-style account, not the primary login (`loadDsmOnlyCredentials`, bearer-free; 2FA; `SRM_PASSWORD`/`SRM_TOTP_SECRET` via env or `*_FILE`). Per-instance `session` + no SID cache (fresh login per process; a dev disk cache was tried and reverted — SRM expires sessions faster than the 10-min client TTL, so a cached SID goes stale → 119 → TOTP-reuse 404). Read tools are token-free (no `X-SYNO-TOKEN`); a future mutating router path would fetch the token via its own request.
 - **Verified live (SRM 1.3.1 / RT6600ax, 2026-06-26):** (1) router login is at `auth.cgi` with `SYNO.API.Auth` **v3** — DSM's `entry.cgi`/v6 returns code 102 on SRM (see `config.ts` per-target `authVersion`/`authPath`); (2) SRM reuses `SYNO.Core.Upgrade.Server check` v1 and returns DSM's **flat `{available, version}`** shape — the anticipated `{type, version}` never materialised, so `mapOsUpdate` needed no change — with `current_version` read from `SYNO.Core.System info` at **v1** (v3 is DSM-only, 104s on SRM); (3) SRM's admin-gated reads do **not** need `enable_syno_token`. **SRM has NO package-update API:** `SYNO.Core.Package.Server` returns code 103 (no callable read method), so `routerPackagesCheckUpdates` degrades to an honest `note` rather than erroring — router *OS* updates ARE detected. (The earlier "SRM packages confirmed at `Package.Server` v2 like DSM" claim was wrong.) Secondary SRM admins are granted via Control Panel → User → Edit → "Grant administrator privilege"; a Normal (non-admin) user gets code 402 at login. **Still planned:** more router read/audit tools (status, security scan) mirroring the NAS read tools.
 
 ## DSM API quirks (the consolidated cheatsheet)
@@ -124,15 +124,11 @@ A reference of error codes, response shapes, and known API names is at [`docs/ds
 
 These are gotchas that aren't obvious from the code. Each one was a real bug we hit.
 
-### 1Password item names: ASCII hyphen only
-
-`op read op://vault/item/field` matches the item by its **title** and rejects unicode dashes (em-dash `—`, en-dash `–`) in item names with "invalid character in secret reference." Spaces are fine; only dashes need to be ASCII. The default in `config.ts` is `Synology DSM` — the bare item **title**; `claude-mcp` is the item's **username**, not part of the title (that tripped a review once). If you rename the item with a hyphen, keep it ASCII, not a prettier em-dash.
-
 ### `claude-mcp` has to be in `administrators`
 
 DSM 7's admin APIs (`SYNO.Core.Package.*`, `SYNO.SecurityAdvisor.*`, `SYNO.Core.User.*`, `SYNO.Core.Share`, etc.) gate on `administrators` group membership. There's no selective-grant mechanism — DSM's "Application Privileges" page covers only end-user services (File Station, SMB, AFP). An earlier draft of this repo planned a non-admin claude-mcp user; that was wrong about what DSM supports.
 
-Compensating controls (documented in `docs/SETUP.md`): password only in 1Password (never typed), 2FA TOTP enforced, no shared-folder access, no SSH service running, Tailscale ACL restricts ports to your devices, bearer + Origin on the MCP endpoint.
+Compensating controls (documented in `docs/SETUP.md`): password never typed (kept in your password manager; the daemon reads it from a `*_FILE`/env secret), 2FA TOTP enforced, no SSH service running, Tailscale ACL restricts ports to your devices, bearer + Origin on the MCP endpoint. (An admin *does* have File Station/share access — that's how the deploy provisions — so the real controls are these, not share ACLs.)
 
 ### Synology Tailscale is userspace-networking — bind loopback + `tailscale serve`
 
@@ -176,7 +172,7 @@ The skill prompt (see `skills/synology/SKILL.md`) loads a per-user policy file n
 
 ### Bearer rotation
 
-`mcp_bearer_token` in 1Password is the single source of truth. Rotation = generate new value → update 1Password → restart container → update `claude_desktop_config.json`'s `MCP_BRIDGE_TOKEN` on every Mac that points here → restart Claude clients.
+The bearer lives in the `mcp_bearer` secret (a `*_FILE` file or the `MCP_BEARER_TOKEN` env). Rotation = generate a new value (`openssl rand -hex 32`) → replace the secret file/env → restart container → update `claude_desktop_config.json`'s `MCP_BRIDGE_TOKEN` on every Mac that points here → restart Claude clients.
 
 ### TLS verification is process-wide via `NODE_TLS_REJECT_UNAUTHORIZED=0`
 
