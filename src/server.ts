@@ -15,6 +15,7 @@ import { serverInstructions } from "./instructions.js";
 import { VERSION } from "./version.js";
 import { nasStatus, nasStorageHealth } from "./tools/system.js";
 import { nasHyperbackupTasks, nasShareSnapshots } from "./tools/backup.js";
+import { nasTaskschedulerList } from "./tools/scheduler.js";
 import {
   nasPackagesList,
   nasPackagesCheckUpdates,
@@ -101,6 +102,13 @@ export function createServer(
     "Btrfs snapshots for a shared folder: per-snapshot timestamp, immutable/WORM lock state (+ lock window), whether scheduled; plus newest/oldest and immutable count. The timestamps reveal the effective snapshot schedule.",
     { share: z.string().describe("Shared folder name, e.g. 'backups'") },
     safeTool((args) => nasShareSnapshots(dsm, args))
+  );
+
+  server.tool(
+    "nas_taskscheduler_list",
+    "DSM Task Scheduler entries: name, type, owner, enabled, schedule (run time + weekdays/repeat), next run, and for script tasks whether errors email + the notify address. Read-only audit of all scheduled tasks (backups, snapshots, custom scripts).",
+    {},
+    safeTool(() => nasTaskschedulerList(dsm))
   );
 
   server.tool(
