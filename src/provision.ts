@@ -22,14 +22,17 @@
  * (that denial doesn't bind admins; verified live). Override the deploy identity
  * with DSM_DEPLOY_* env vars for a separate admin account.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, writeFile, mkdtemp, rm, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { authenticator } from "otplib";
-import { type Config, envValue } from "../config.js";
-import { loadDsmOnlyCredentials, credsFromPrefix } from "../auth.js";
+import { gatherInstallCredentials, gatherDsmCredentials, type InstallCredentials } from "./creds.js";
+import { type Config, envValue } from "./config.js";
+import { credsFromPrefix } from "./auth.js";
 
 const execFileP = promisify(execFile);
 
@@ -40,8 +43,8 @@ const POLL_TIMEOUT_MS = 120_000;
 
 interface DeployArgs {
   tar: string;
+  /** Internal (dev `npm run deploy`); no user-facing flag. Defaults to synology-mcp. */
   project?: string;
-  healthPort?: number;
 }
 
 interface DeployResult {
@@ -58,22 +61,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Mint a fresh SID via TOTP. We don't reuse the cached SID for deploys
- *  because deploys can run as a different user (DSM_DEPLOY_USER) than the
- *  runtime claude-mcp. A fresh login keeps user separation explicit. */
-async function loginForDeploy(
-  cfg: Config
+/** Log in to DSM with explicit credentials and return the API session. Also the
+ *  install path's credential *validation* — a wrong password / mis-copied TOTP
+ *  seed fails here, before anything is pushed to the NAS. */
+export async function loginWithCreds(
+  cfg: Config,
+  user: string,
+  password: string,
+  totpSecret: string
 ): Promise<{ sid: string; synotoken: string; user: string }> {
-  // Deploy needs only password + TOTP (no bearer). An explicit DSM_DEPLOY_* pair (env
-  // or *_FILE) wins; else the runtime DSM_* login secrets (bearer-free). credsFromPrefix
-  // fails loud on a half-set pair or a misconfig — it never silently mixes a
-  // DSM_DEPLOY_USER with the runtime DSM_* password.
-  const user = envValue("DSM_DEPLOY_USER") ?? cfg.user;
-  const { password, totpSecret } =
-    credsFromPrefix("DSM_DEPLOY") ?? (await loadDsmOnlyCredentials("DSM"));
   const totp = authenticator.generate(totpSecret);
-  // POST with credentials in the form BODY, never the URL query string — DSM access
-  // logs and any proxy record request URLs, not bodies.
+  // POST with credentials in the form BODY, never the URL query string — so the
+  // password + live TOTP can't be captured by a proxy / DSM access log that records
+  // request URLs. TLS to DSM's self-signed cert is still skipped process-wide (see
+  // runInstall); that blast radius is this DSM host only.
   const form = new URLSearchParams({
     api: "SYNO.API.Auth",
     version: "6",
@@ -94,14 +95,38 @@ async function loginForDeploy(
   if (!body?.success) {
     const code = body?.error?.code ?? -1;
     throw new Error(
-      `Deploy login failed (code ${code}). Set DSM_DEPLOY_USER/PASSWORD/TOTP_SECRET to use a different admin account.`
+      `DSM login failed for ${user} (code ${code}). Check the password + TOTP seed ` +
+        `(${code === 400 || code === 404 ? "code 400/404 = wrong password or TOTP" : "see docs/dsm-api-quirks.md"}).`
     );
   }
-  return {
-    sid: body.data.sid,
-    synotoken: body.data.synotoken ?? "",
-    user,
-  };
+  return { sid: body.data.sid, synotoken: body.data.synotoken ?? "", user };
+}
+
+/** Best-effort: invalidate the deploy SID so a session token that was briefly on
+ *  curl's argv (visible via `ps` during the run) is dead the moment we finish. */
+async function logout(cfg: Config, auth: { sid: string; synotoken: string }): Promise<void> {
+  await dsmCallWithToken(cfg, auth, {
+    api: "SYNO.API.Auth",
+    method: "logout",
+    version: 6,
+    params: { session: "synology-mcp-deploy" },
+  }).catch(() => {
+    /* best-effort — a lingering SID expires on its own */
+  });
+}
+
+async function loginForDeploy(
+  cfg: Config
+): Promise<{ sid: string; synotoken: string; user: string }> {
+  // Deploy/update need only password + TOTP (no bearer — that lives on the NAS). An
+  // explicit DSM_DEPLOY_* pair (env or *_FILE) wins; else gatherDsmCredentials resolves
+  // the DSM_* login secrets (env/*_FILE) or a no-echo prompt (the flagship prompt-install
+  // Mac). credsFromPrefix fails loud on a half-set/misconfigured pair — it never silently
+  // mixes a DSM_DEPLOY_USER with the runtime password, and a prompt can't mask a real
+  // error. op users run `op run -- synology-mcp update`.
+  const user = envValue("DSM_DEPLOY_USER") ?? cfg.user;
+  const { password, totpSecret } = credsFromPrefix("DSM_DEPLOY") ?? (await gatherDsmCredentials());
+  return loginWithCreds(cfg, user, password, totpSecret);
 }
 
 /** Build curl args common to every deploy call: silent + optional TLS skip.
@@ -112,6 +137,23 @@ function curlBase(cfg: Config): string[] {
   const args = ["-s"];
   if (cfg.tlsSkipVerify) args.push("-k");
   return args;
+}
+
+/** Run curl and return stdout, but on failure throw WITHOUT the argv. Node's
+ *  execFile rejection message embeds the full command line, which for these DSM
+ *  calls carries the session `_sid` + `SynoToken`; letting it propagate would
+ *  print a live admin session token into terminal scrollback / CI logs. */
+async function runCurl(
+  args: string[],
+  opts: { maxBuffer: number },
+  label: string
+): Promise<string> {
+  try {
+    const { stdout } = await execFileP("curl", args, opts);
+    return stdout;
+  } catch (err: any) {
+    throw new Error(`${label}: curl failed (${err?.code ?? err?.signal ?? "error"})`);
+  }
 }
 
 /** Upload + import the image tar in one shot via the chunked-upload URL the
@@ -143,7 +185,7 @@ async function uploadImage(
     "-F",
     `filename=@${tarPath};filename=${filename}`,
   ];
-  const { stdout } = await execFileP("curl", args, { maxBuffer: 4 * 1024 * 1024 });
+  const stdout = await runCurl(args, { maxBuffer: 4 * 1024 * 1024 }, "Image.upload");
   let body: any;
   try {
     body = JSON.parse(stdout);
@@ -193,7 +235,7 @@ async function dsmCallWithToken<T = any>(
   }
   if (auth.synotoken) args.push("-H", `X-SYNO-TOKEN: ${auth.synotoken}`);
   console.error(`[dsm-curl] → ${opts.api}.${opts.method}`, opts.params ?? {});
-  const { stdout } = await execFileP("curl", args, { maxBuffer: 16 * 1024 * 1024 });
+  const stdout = await runCurl(args, { maxBuffer: 16 * 1024 * 1024 }, `${opts.api}.${opts.method}`);
   let body: any;
   try {
     body = JSON.parse(stdout);
@@ -237,7 +279,7 @@ async function findProject(
  *  compose changes ship with the tool (the operator never hand-edits it). */
 async function repoComposeContent(): Promise<string> {
   return readFile(
-    join(new URL(import.meta.url).pathname, "..", "..", "..", "synology.compose.yml"),
+    join(fileURLToPath(import.meta.url), "..", "..", "synology.compose.yml"),
     "utf8"
   );
 }
@@ -270,39 +312,44 @@ async function uploadText(
   filename: string,
   content: string
 ): Promise<void> {
-  // Unique temp dir per call (no fixed-path collision between concurrent deploys),
-  // and the write is inside the try so a partial write is still cleaned up. Mode
-  // 0600 in case this helper is later reused for secret content.
-  const dir = await mkdtemp(join(tmpdir(), "synmcp-deploy-"));
-  const tmp = join(dir, filename);
+  // Stream the body via curl's stdin (file=@-), so secret content never lands in a
+  // temp file on the deploying Mac. This is the install path's guarantee: no
+  // plaintext at rest locally.
+  const url = entryUrl(cfg, auth, {
+    api: "SYNO.FileStation.Upload",
+    version: "2",
+    method: "upload",
+  });
+  const args = [
+    ...curlBase(cfg),
+    "-X", "POST", url,
+    "-H", `X-SYNO-TOKEN: ${auth.synotoken}`,
+    "-F", `path=${folderPath}`,
+    "-F", "create_parents=true",
+    "-F", "overwrite=true",
+    "-F", `file=@-;filename=${filename}`,
+  ];
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = spawn("curl", args);
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve(out) : reject(new Error(`curl exited ${code}: ${err.slice(0, 200)}`))
+    );
+    child.stdin.on("error", () => {}); // ignore EPIPE if curl exits before we finish writing
+    child.stdin.end(content);
+  });
+  let body: any;
   try {
-    await writeFile(tmp, content, { mode: 0o600 });
-    const url = entryUrl(cfg, auth, {
-      api: "SYNO.FileStation.Upload",
-      version: "2",
-      method: "upload",
-    });
-    const args = [
-      ...curlBase(cfg),
-      "-X", "POST", url,
-      "-H", `X-SYNO-TOKEN: ${auth.synotoken}`,
-      "-F", `path=${folderPath}`,
-      "-F", "create_parents=true",
-      "-F", "overwrite=true",
-      "-F", `file=@${tmp};filename=${filename}`,
-    ];
-    const { stdout } = await execFileP("curl", args, { maxBuffer: 1024 * 1024 });
-    let body: any;
-    try {
-      body = JSON.parse(stdout);
-    } catch {
-      throw new Error(`FileStation.Upload returned non-JSON: ${stdout.slice(0, 200)}`);
-    }
-    if (!body?.success) {
-      throw new Error(`FileStation.Upload ${filename} failed (code ${body?.error?.code})`);
-    }
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    body = JSON.parse(stdout);
+  } catch {
+    throw new Error(`FileStation.Upload returned non-JSON: ${stdout.slice(0, 200)}`);
+  }
+  if (!body?.success) {
+    throw new Error(`FileStation.Upload ${filename} failed (code ${body?.error?.code})`);
   }
 }
 
@@ -411,24 +458,25 @@ async function rebuildProject(
   });
 }
 
-/** Poll the daemon's /health until it reports the version we just shipped. */
-async function pollHealth(
-  cfg: Config,
-  expectedVersion: string,
-  port: number
-): Promise<string> {
+/** Poll the daemon's /health until it reports the version we just shipped. Returns
+ *  the version on success, or `null` if /health was never reachable from here — the
+ *  expected case when the daemon binds loopback (see below), NOT a deploy failure.
+ *  Throws only when /health answered but never with the expected version. */
+async function pollHealth(cfg: Config, expectedVersion: string): Promise<string | null> {
   // Default: hit /health directly on the daemon port (same host as DSM).
   // When the daemon binds loopback-only (fronted by `tailscale serve`), that
   // port isn't reachable from here, so MCP_HEALTH_URL overrides with the serve
   // endpoint. Bearer not required for /health.
   const url =
     process.env.MCP_HEALTH_URL ??
-    `http://${new URL(cfg.baseUrl).hostname}:${port}/health`;
+    `http://${new URL(cfg.baseUrl).hostname}:${HEALTH_PORT_DEFAULT}/health`;
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let reached = false;
   let lastErr: string | undefined;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url);
+      reached = true;
       if (res.ok) {
         const body = (await res.json()) as any;
         if (body?.version === expectedVersion) {
@@ -444,18 +492,37 @@ async function pollHealth(
     }
     await sleep(POLL_INTERVAL_MS);
   }
+  // Never got an HTTP response → the daemon is almost certainly bound to loopback
+  // (MCP_BIND_HOST=127.0.0.1, the recommended default) and simply isn't reachable
+  // from here. Expected, not a failure — let the caller warn instead of aborting.
+  if (!reached) return null;
+  // Reached but never the expected version → a real failure (bad image, stuck build).
   throw new Error(
-    `/health never reported ${expectedVersion} within ${POLL_TIMEOUT_MS / 1000}s (${url}); ` +
-      `last=${lastErr}. If the daemon binds loopback (MCP_BIND_HOST=127.0.0.1, the default) ` +
-      `it isn't reachable at the NAS's LAN/tailnet IP:${port} unless tailscaled forwards it — ` +
-      `set MCP_HEALTH_URL to the tailscale-serve endpoint (e.g. https://<nas>.<tailnet>.ts.net/health).`
+    `/health at ${url} never reported ${expectedVersion} within ${POLL_TIMEOUT_MS / 1000}s ` +
+      `(last=${lastErr}) — the new build may not have started.`
   );
 }
 
+/** Deploy = log in as the deploy user, then provision. install() reuses
+ *  provisionWithAuth with a session it already validated against the operator's
+ *  entered creds. */
 export async function deploy(cfg: Config, args: DeployArgs): Promise<DeployResult> {
+  const auth = await loginForDeploy(cfg);
+  log(`logged in as ${auth.user}`);
+  try {
+    return await provisionWithAuth(cfg, auth, args);
+  } finally {
+    await logout(cfg, auth);
+  }
+}
+
+async function provisionWithAuth(
+  cfg: Config,
+  auth: { sid: string; synotoken: string; user: string },
+  args: DeployArgs
+): Promise<DeployResult> {
   const tarPath = args.tar;
   const projectName = args.project ?? PROJECT_NAME_DEFAULT;
-  const healthPort = args.healthPort ?? HEALTH_PORT_DEFAULT;
 
   const st = await stat(tarPath).catch(() => null);
   if (!st || !st.isFile()) {
@@ -467,26 +534,21 @@ export async function deploy(cfg: Config, args: DeployArgs): Promise<DeployResul
   // tied to the build under deploy, not the file name.
   const pkg = JSON.parse(
     await readFile(
-      join(new URL(import.meta.url).pathname, "..", "..", "..", "package.json"),
+      join(fileURLToPath(import.meta.url), "..", "..", "package.json"),
       "utf8"
     )
   );
   const expectedVersion = pkg.version as string;
   log(`target version: ${expectedVersion}`);
 
-  // Login as the deploy user (defaults to claude-mcp; overridable via env).
-  // We carry SID + SynoToken explicitly through the rest of the flow — every
-  // mutating Docker.* endpoint requires the CSRF token, and threading it via
-  // SynoClient would mean a bigger change for a one-shot path.
-  const auth = await loginForDeploy(cfg);
-  log(`logged in as ${auth.user}`);
-
-  // 1. Upload + import (one call via the chunked-upload URL)
+  // 1. Upload + import (one call via the chunked-upload URL). auth (SID +
+  // SynoToken) is carried explicitly — every mutating Docker.* endpoint needs the
+  // CSRF token.
   await uploadImage(cfg, auth, tarPath);
 
   // 2. Install-or-update: sync the compose, creating the project on first install.
-  //    Secrets (the 3 files in ./secrets) stay operator-owned and are never touched
-  //    here — the daemon reads them read-only.
+  //    Secrets (the 3 files in ./secrets) stay operator-owned and are never
+  //    touched here — the daemon reads them read-only.
   const composeContent = await repoComposeContent();
   const projDir = `/docker/${projectName}`;
   const existing = await findProject(cfg, auth, projectName);
@@ -512,11 +574,167 @@ export async function deploy(cfg: Config, args: DeployArgs): Promise<DeployResul
   //    the tool's own tested file, so a build failure is an image/DSM problem a compose
   //    restore wouldn't fix. Let the error bubble up — the caller decides what to do.
   await rebuildProject(cfg, auth, projectId, status);
-  const healthVersion = await pollHealth(cfg, expectedVersion, healthPort);
+
+  const healthVersion = await pollHealth(cfg, expectedVersion);
+  if (healthVersion === null) {
+    log(
+      `deployed, but /health wasn't reachable from here — expected when the daemon binds loopback ` +
+        `(MCP_BIND_HOST=127.0.0.1, the default). Verify via the container log or the tailscale-serve ` +
+        `URL (https://<nas>.<tailnet>.ts.net/health), or set MCP_HEALTH_URL to poll it directly.`
+    );
+  }
 
   return {
     imageImported: true,
     projectId,
-    healthVersion,
+    healthVersion: healthVersion ?? `${expectedVersion} (not verified from here)`,
   };
+}
+
+// ─── Install / update (the published `synology-mcp install|update`) ───────────
+
+async function pkgJson(): Promise<any> {
+  return JSON.parse(
+    await readFile(join(fileURLToPath(import.meta.url), "..", "..", "package.json"), "utf8")
+  );
+}
+
+/** owner/repo parsed from package.json's repository url — for the release download. */
+function repoSlug(pkg: any): string {
+  const url: string = pkg?.repository?.url ?? pkg?.repository ?? "";
+  const m = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (!m) {
+    throw new Error(`can't derive the GitHub repo from package.json repository (${url}) — pass --tar`);
+  }
+  return m[1];
+}
+
+/** True iff `data` hashes to the expected lowercase-hex sha256. A malformed/empty
+ *  expected (e.g. a 404 page saved as the .sha256) is treated as NO match. */
+export function sha256Matches(expectedHex: string, data: Buffer): boolean {
+  if (!/^[0-9a-f]{64}$/.test(expectedHex)) return false;
+  return createHash("sha256").update(data).digest("hex") === expectedHex;
+}
+
+/** curl a URL to a file with TLS verification ON — no `-k`, so this VERIFIES
+ *  github.com's cert regardless of the process-wide NODE_TLS_REJECT_UNAUTHORIZED=0
+ *  we set for DSM's self-signed cert. -f: fail (nonzero) on an HTTP error instead
+ *  of saving a 404 page. -L: follow the redirect to objects.githubusercontent.com. */
+async function curlDownload(url: string, dest: string): Promise<void> {
+  try {
+    await execFileP("curl", ["-fSL", "--retry", "2", "-o", dest, url], {
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err: any) {
+    throw new Error(
+      `download failed: ${url} (curl ${err?.code ?? "error"}). Ensure the release asset exists, ` +
+        `or build locally and pass --tar <path>.`
+    );
+  }
+}
+
+/** Download the release image tar matching this CLI's version to a temp file and
+ *  verify its published sha256. curl (not Node fetch) so TLS to GitHub is verified
+ *  even though the DSM path disables verification process-wide. */
+async function downloadReleaseTar(pkg: any, version: string): Promise<string> {
+  const asset = `synology-mcp-${version}-amd64.tar`;
+  const base = `https://github.com/${repoSlug(pkg)}/releases/download/v${version}`;
+  const dir = await mkdtemp(join(tmpdir(), "synmcp-install-"));
+  const dest = join(dir, asset);
+  const sumPath = `${dest}.sha256`;
+  log(`downloading image ${base}/${asset} …`);
+  await curlDownload(`${base}/${asset}`, dest);
+  await curlDownload(`${base}/${asset}.sha256`, sumPath);
+  // Integrity check: refuse a truncated/tampered asset. (The checksum is published
+  // alongside the tar, so this is not a signature — TLS-verified GitHub is the trust
+  // anchor; the hash catches corruption and the redirect hop.)
+  const expected = (await readFile(sumPath, "utf8")).trim().split(/\s+/)[0];
+  const data = await readFile(dest);
+  if (!sha256Matches(expected, data)) {
+    const actual = createHash("sha256").update(data).digest("hex");
+    throw new Error(
+      `image checksum mismatch for ${asset} (expected ${expected || "?"}, got ${actual}) — ` +
+        `refusing to import. Retry, or build locally and pass --tar <path>.`
+    );
+  }
+  const size = (await stat(dest)).size;
+  log(`image saved + sha256-verified (${(size / 1024 / 1024).toFixed(1)} MB)`);
+  return dest;
+}
+
+/** --tar wins; else download the release tar for `version`. temp=true → caller removes it. */
+async function resolveTar(
+  pkg: any,
+  opts: { tar?: string },
+  version: string
+): Promise<{ tar: string; temp: boolean }> {
+  if (opts.tar) return { tar: opts.tar, temp: false };
+  return { tar: await downloadReleaseTar(pkg, version), temp: true };
+}
+
+/** Push the three credential files into /docker/<project>/secrets over stdin
+ *  (never on the Mac's disk). create_parents makes the dir; the daemon reads them
+ *  read-only (the admin-gated docker share is the at-rest control). */
+async function pushSecrets(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  projectName: string,
+  creds: InstallCredentials
+): Promise<void> {
+  const dir = `/docker/${projectName}/secrets`;
+  await uploadText(cfg, auth, dir, "dsm_password", creds.password);
+  await uploadText(cfg, auth, dir, "dsm_totp", creds.totpSecret);
+  await uploadText(cfg, auth, dir, "mcp_bearer", creds.bearer);
+  log(`pushed 3 secret files → ${dir}`);
+}
+
+export interface InstallArgs {
+  /** Local image tar; else the matching GitHub release is downloaded. */
+  tar?: string;
+  /** Called with the generated bearer once secrets are pushed — BEFORE the health
+   *  poll, so the "store this" line prints even if the poll can't reach a
+   *  loopback-bound daemon from the operator's Mac. */
+  onBearer?: (bearer: string) => void;
+}
+
+/** First install: gather + validate creds, push secrets, provision. Returns the
+ *  generated bearer so the CLI can print the client-wiring line. */
+export async function install(
+  cfg: Config,
+  opts: InstallArgs
+): Promise<{ bearer: string; healthVersion: string }> {
+  const pkg = await pkgJson();
+  const version = pkg.version as string;
+  const creds = await gatherInstallCredentials();
+  log(`validating DSM login as ${cfg.user} …`);
+  const auth = await loginWithCreds(cfg, cfg.user, creds.password, creds.totpSecret);
+  log(`login OK`);
+  // Resolve the image BEFORE pushing secrets: a missing release (the most likely
+  // failure) then aborts without leaving plaintext secret files orphaned on the NAS.
+  const { tar, temp } = await resolveTar(pkg, opts, version);
+  try {
+    await ensureProjectDir(cfg, auth, PROJECT_NAME_DEFAULT);
+    await pushSecrets(cfg, auth, PROJECT_NAME_DEFAULT, creds);
+    // The bearer is valid now, independent of whether the health poll below can
+    // reach the daemon — surface it before we risk a poll timeout.
+    opts.onBearer?.(creds.bearer);
+    const result = await provisionWithAuth(cfg, auth, { tar });
+    return { bearer: creds.bearer, healthVersion: result.healthVersion };
+  } finally {
+    if (temp) await rm(dirname(tar), { recursive: true, force: true }).catch(() => {});
+    await logout(cfg, auth);
+  }
+}
+
+/** Update an existing install to this CLI's version. Re-authenticates from
+ *  DSM_DEPLOY_* / DSM_* env or an interactive prompt (op users: `op run`); needs
+ *  only password + TOTP, no bearer. */
+export async function update(cfg: Config, opts: { tar?: string }): Promise<DeployResult> {
+  const pkg = await pkgJson();
+  const { tar, temp } = await resolveTar(pkg, opts, pkg.version as string);
+  try {
+    return await deploy(cfg, { tar });
+  } finally {
+    if (temp) await rm(dirname(tar), { recursive: true, force: true }).catch(() => {});
+  }
 }
