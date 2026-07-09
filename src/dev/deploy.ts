@@ -148,6 +148,21 @@ async function uploadImage(
   log(`image imported`);
 }
 
+/** entry.cgi URL carrying the deploy session (SID + SynoToken) as query params —
+ *  the auth every File Station / Docker.* curl call needs. `params` (api, method,
+ *  version, …) ride the query too; JSON calls pass the rest as curl form fields. */
+function entryCgiUrl(
+  cfg: Config,
+  auth: { sid: string; synotoken: string },
+  params: Record<string, string> = {}
+): string {
+  const url = new URL(`${cfg.baseUrl}/webapi/entry.cgi`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  url.searchParams.set("_sid", auth.sid);
+  if (auth.synotoken) url.searchParams.set("SynoToken", auth.synotoken);
+  return url.toString();
+}
+
 /** Run a DSM Web API call with SynoToken via curl. DSM gates mutating
  *  endpoints (Image.upload, Project.{stop,start,build}) on the CSRF token
  *  even when the SID is valid; without it you get a misleading code 119
@@ -158,10 +173,7 @@ async function dsmCallWithToken<T = any>(
   auth: { sid: string; synotoken: string },
   opts: { api: string; method: string; version: number; params?: Record<string, string> }
 ): Promise<T> {
-  const url = new URL(`${cfg.baseUrl}/webapi/entry.cgi`);
-  url.searchParams.set("_sid", auth.sid);
-  if (auth.synotoken) url.searchParams.set("SynoToken", auth.synotoken);
-  const args: string[] = [...curlBase(cfg), "-X", "POST", url.toString()];
+  const args: string[] = [...curlBase(cfg), "-X", "POST", entryCgiUrl(cfg, auth)];
   const dataPairs: Record<string, string> = {
     api: opts.api,
     version: String(opts.version),
