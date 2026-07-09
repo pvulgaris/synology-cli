@@ -1,0 +1,42 @@
+name: release
+
+# On a v* tag: build the amd64 image and attach a DSM-importable docker-archive tar
+# to the GitHub Release, so `synology-mcp install|update` can download it — no local
+# `container`/`skopeo` toolchain needed by end users.
+#
+# Why this is simpler than the local build: GitHub runners have real Docker, so
+# `docker build -t synology-mcp:<ver> -t synology-mcp:latest` + `docker save` emit a
+# docker-archive whose RepoTags are already the BARE names DSM needs. The whole
+# skopeo / fully-qualified-RepoTag rewrite gotcha (see CLAUDE.md) only exists because
+# Apple `container` emits OCI archives — it disappears here.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create/attach the release asset
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + save amd64 image (bare tags) + checksum
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          docker build --platform linux/amd64 -t "synology-mcp:${VER}" -t synology-mcp:latest .
+          docker save -o "synology-mcp-${VER}-amd64.tar" "synology-mcp:${VER}" synology-mcp:latest
+          # Publish a sha256 the installer verifies after download (integrity check).
+          sha256sum "synology-mcp-${VER}-amd64.tar" > "synology-mcp-${VER}-amd64.tar.sha256"
+          ls -lh "synology-mcp-${VER}-amd64.tar"*
+
+      - name: Attach tar + checksum to the release
+        # Pinned by commit SHA (v2) — a mutable tag on a third-party action running
+        # with contents:write could otherwise swap the asset out from under us.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          files: |
+            synology-mcp-*-amd64.tar
+            synology-mcp-*-amd64.tar.sha256
