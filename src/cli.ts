@@ -20,6 +20,7 @@ import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { SynoClient, makeRouterClient } from "./dsm.js";
 import { startHttpDaemon } from "./http.js";
+import { install, update } from "./provision.js";
 
 async function serveStdio() {
   const cfg = loadConfig();
@@ -105,6 +106,64 @@ async function bridge() {
   await Promise.all([upstream.start(), downstream.start()]);
 }
 
+/** Parse `--key value` / `--key=value` flags into a map (values are strings). */
+function parseFlags(argv: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (!tok.startsWith("--")) continue;
+    const eq = tok.indexOf("=");
+    if (eq !== -1) out[tok.slice(2, eq)] = tok.slice(eq + 1);
+    else out[tok.slice(2)] = argv[++i] ?? "";
+  }
+  return out;
+}
+
+/**
+ * `install` — first-time provision from the operator's Mac. Reads the DSM password
+ * + TOTP seed from env (DSM_PASSWORD / DSM_TOTP_SECRET; op users: `op run`) or a
+ * no-echo prompt, validates by live login, generates the bearer, pushes secrets +
+ * compose + image over the DSM API, prints the client wiring. Flags:
+ * --nas <https://host:5001> (or DSM_BASE_URL), --tar <path> (else the matching
+ * GitHub release is downloaded + sha256-verified).
+ */
+/** Print the client-wiring line. Called via install()'s onBearer BEFORE the health
+ *  poll, so the once-shown bearer survives a poll timeout against a loopback daemon. */
+function printWiring(bearer: string) {
+  console.error(
+    `\nWire your client (the bearer is shown once — store it):\n` +
+      `  claude mcp add --transport http synology <YOUR-NAS-URL>/mcp \\\n` +
+      `    --header "Authorization: Bearer ${bearer}"\n`
+  );
+}
+
+async function runInstall() {
+  const flags = parseFlags(process.argv.slice(3));
+  if (flags.nas) process.env.DSM_BASE_URL = flags.nas;
+  const cfg = loadConfig();
+  // Skip Node's TLS verification for DSM's self-signed cert. Scoped safely: the
+  // only Node fetch to DSM is the login POST; the release download uses curl with
+  // verification ON, so this does NOT weaken the image fetch.
+  if (cfg.tlsSkipVerify) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  const { healthVersion } = await install(cfg, {
+    tar: flags.tar,
+    onBearer: printWiring,
+  });
+  console.error(`\n✓ installed — version ${healthVersion}`);
+}
+
+/** `update` — pull this CLI's version to an existing install. Re-auths from
+ *  DSM_DEPLOY_* / DSM_* env or a prompt (op users: `op run`). */
+async function runUpdate() {
+  const flags = parseFlags(process.argv.slice(3));
+  if (flags.nas) process.env.DSM_BASE_URL = flags.nas;
+  const cfg = loadConfig();
+  // See runInstall: DSM login fetch only; the curl image download verifies TLS.
+  if (cfg.tlsSkipVerify) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  const r = await update(cfg, { tar: flags.tar });
+  console.error(`✓ updated — version ${r.healthVersion}`);
+}
+
 async function main() {
   const cmd = process.argv[2] ?? "serve";
   switch (cmd) {
@@ -117,10 +176,16 @@ async function main() {
     case "bridge":
       await bridge();
       break;
+    case "install":
+      await runInstall();
+      break;
+    case "update":
+      await runUpdate();
+      break;
     default:
       console.error(
-        `Unknown command: ${cmd}. Use 'serve' (stdio direct), 'daemon' (HTTP), ` +
-          `or 'bridge' (stdio→HTTP proxy).`
+        `Unknown command: ${cmd}. Use 'install' / 'update' (provision the NAS), ` +
+          `'serve' (stdio direct), 'daemon' (HTTP), or 'bridge' (stdio→HTTP proxy).`
       );
       process.exit(2);
   }

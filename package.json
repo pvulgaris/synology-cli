@@ -26,7 +26,8 @@
     "synology-mcp": "dist/cli.js"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "synology.compose.yml"
   ],
   "scripts": {
     "build": "tsc",
