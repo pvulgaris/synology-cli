@@ -11,6 +11,7 @@
 import { loadConfig } from "../config.js";
 import { SynoClient, makeRouterClient } from "../dsm.js";
 import { nasStatus, nasStorageHealth } from "../tools/system.js";
+import { nasHyperbackupTasks, nasShareSnapshots } from "../tools/backup.js";
 import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "../tools/updates.js";
 import { routerSrmOsCheckUpdate } from "../tools/router.js";
 import { nasSharesList } from "../tools/shares.js";
@@ -31,6 +32,9 @@ import { nasCertificates } from "../tools/certificates.js";
 const SUITE: Record<string, (dsm: SynoClient) => Promise<unknown>> = {
   nas_status: nasStatus,
   nas_storage_health: nasStorageHealth,
+  nas_hyperbackup_tasks: nasHyperbackupTasks,
+  nas_share_snapshots: (dsm) =>
+    nasShareSnapshots(dsm, { share: process.env.VERIFY_SNAPSHOT_SHARE || "backups" }),
   nas_shares_list: nasSharesList,
   nas_packages_list: nasPackagesList,
   nas_packages_check_updates: nasPackagesCheckUpdates,
@@ -76,6 +80,22 @@ const ASSERTIONS: Record<string, (out: any) => string | null> = {
     if (!Array.isArray(o.drives) || o.drives.length === 0) return "no drives";
     if (!o.volumes.every((v: any) => typeof v.size_total === "number"))
       return "volume size_total not numeric";
+    return null;
+  },
+  nas_hyperbackup_tasks: (o) => {
+    if (!Array.isArray(o.tasks) || o.tasks.length === 0) return "no backup tasks";
+    if (!o.tasks.every((t: any) => typeof t.is_c2 === "boolean"))
+      return "is_c2 not populated (target_type missing?)";
+    if (!o.tasks.some((t: any) => t.schedule?.time || t.last_result != null))
+      return "no task has schedule or last_result (status additional[] not unpacked?)";
+    return null;
+  },
+  nas_share_snapshots: (o) => {
+    if (!Array.isArray(o.snapshots)) return "snapshots not an array";
+    if (typeof o.immutable_count !== "number") return "immutable_count not numeric";
+    // 'backups' has scheduled snapshots; a populated one must parse to an ISO time.
+    if (o.snapshots.length > 0 && !/^\d{4}-\d{2}-\d{2}T/.test(o.newest ?? ""))
+      return "newest not an ISO time (snapshot time parse failed?)";
     return null;
   },
   nas_shares_list: (o) => {

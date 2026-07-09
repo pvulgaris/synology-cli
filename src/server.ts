@@ -14,6 +14,7 @@ import type { SynoClient } from "./dsm.js";
 import { serverInstructions } from "./instructions.js";
 import { VERSION } from "./version.js";
 import { nasStatus, nasStorageHealth } from "./tools/system.js";
+import { nasHyperbackupTasks, nasShareSnapshots } from "./tools/backup.js";
 import {
   nasPackagesList,
   nasPackagesCheckUpdates,
@@ -86,6 +87,20 @@ export function createServer(
     "Volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model).",
     {},
     safeTool(() => nasStorageHealth(dsm))
+  );
+
+  server.tool(
+    "nas_hyperbackup_tasks",
+    "Hyper Backup tasks: name, destination (flags Synology C2), client-side-encryption, schedule (run time), last result (done/failed/…), last-success + next-run times. Read-only audit of backup jobs.",
+    {},
+    safeTool(() => nasHyperbackupTasks(dsm))
+  );
+
+  server.tool(
+    "nas_share_snapshots",
+    "Btrfs snapshots for a shared folder: per-snapshot timestamp, immutable/WORM lock state (+ lock window), whether scheduled; plus newest/oldest and immutable count. The timestamps reveal the effective snapshot schedule.",
+    { share: z.string().describe("Shared folder name, e.g. 'backups'") },
+    safeTool((args) => nasShareSnapshots(dsm, args))
   );
 
   server.tool(
