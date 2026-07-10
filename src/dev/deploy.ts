@@ -159,7 +159,7 @@ async function uploadImage(
 /** entry.cgi URL carrying the deploy session (SID + SynoToken) as query params —
  *  the auth every File Station / Docker.* curl call needs. `params` (api, method,
  *  version, …) ride the query too; JSON calls pass the rest as curl form fields. */
-function entryCgiUrl(
+function entryUrl(
   cfg: Config,
   auth: { sid: string; synotoken: string },
   params: Record<string, string> = {}
@@ -181,7 +181,7 @@ async function dsmCallWithToken<T = any>(
   auth: { sid: string; synotoken: string },
   opts: { api: string; method: string; version: number; params?: Record<string, string> }
 ): Promise<T> {
-  const args: string[] = [...curlBase(cfg), "-X", "POST", entryCgiUrl(cfg, auth)];
+  const args: string[] = [...curlBase(cfg), "-X", "POST", entryUrl(cfg, auth)];
   const dataPairs: Record<string, string> = {
     api: opts.api,
     version: String(opts.version),
@@ -277,7 +277,7 @@ async function uploadText(
   const tmp = join(dir, filename);
   try {
     await writeFile(tmp, content, { mode: 0o600 });
-    const url = entryCgiUrl(cfg, auth, {
+    const url = entryUrl(cfg, auth, {
       api: "SYNO.FileStation.Upload",
       version: "2",
       method: "upload",
