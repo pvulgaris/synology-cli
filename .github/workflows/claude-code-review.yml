@@ -50,4 +50,4 @@ jobs:
             issues (skip style nitpicks), post ONE summary comment listing them
             with `gh pr comment`. If the diff is clean, post nothing — the
             passing check is the all-clear.
-          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh:*)" --max-turns 30'
+          claude_args: '--allowedTools "Read,Grep,Glob,Bash(gh:*)" --max-turns 50'
