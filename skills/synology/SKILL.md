@@ -35,7 +35,7 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno security settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, NFS, auto-update, password policy, Active Insight |
 | `syno shares list` | shares incl. encryption, quota (mb used/total), recycle-bin, snapshot support |
 | `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
-| `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result |
+| `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result. Returns `{ tasks: [], note }` if Hyper Backup isn't installed, not an error |
 | `syno tasks list` | DSM Task Scheduler entries |
 | `syno external` | QuickConnect, DDNS, App Portal HTTPS-per-app, reverse-proxy rules, port forwarding |
 | `syno notifications` | SMTP mail config: server, ssl, verify-cert, sender, recipient count |
@@ -132,13 +132,13 @@ When composing security-audit output, attach a stable `id: synology.<category>.<
 | `synology.users.admin_active` | user `admin` not in expired state |
 | `synology.users.guest_active` | user `guest` not in expired state |
 | `synology.users.no_2fa` | per-user finding when `otp_enabled === false` on a non-disabled account |
-| `synology.notifications.no_recipients` | `notifications.mail.recipients_count === 0` while `mail.enabled === true` |
+| `synology.notifications.no_recipients` | `mail.recipients_count === 0` while `mail.enabled === true` |
 | `synology.notifications.smtp_verify_cert_off` | `mail.verify_cert === false` |
 | `synology.shares.no_encryption` | per-share when `encryption === 0` and the share holds user data |
 | `synology.shares.no_recycle_bin` | per-share when `recycle_bin === false` on a user-data share |
 | `synology.cert.expiring_soon` | per-cert when `days_until_expiry < 30` |
 | `synology.external.quickconnect_relay_on` | `quick_connect.enabled === false` AND `relay_enabled === true` (half-configured) |
-| `synology.password.weak_policy` | min_length < 12, no special_char requirement, history_num === 0, etc. |
+| `synology.password.weak_policy` | fields nest under `password_policy.strong_password`: `min_length < 12` (only meaningful when `min_length_enable === true`), `included_special_char === false`, `history_num === 0` |
 | `synology.privacy.active_insight_on` | `active_insight.monitoring_service === true` (observation only) |
 | `synology.packages.outdated` | `syno packages updates` → `pending` non-empty |
 
