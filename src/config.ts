@@ -24,6 +24,9 @@
  *   SRM_PASSWORD / SRM_TOTP_SECRET (or *_FILE)  router login secrets
  */
 
+import { join } from "node:path";
+import { defaultSessionPath, stateDir } from "./session.js";
+
 /** Optional second target: the Synology router (SRM). SRM speaks the same
  *  SYNO.* Web API as DSM on port 8001. Its package/upgrade reads are admin-gated
  *  (no selective grant), so `user` must be an admin — use a *dedicated* SRM admin
@@ -59,9 +62,6 @@ export interface Config {
   baseUrl: string;
   /** Login account on the target. Sourced from DSM_USER / SRM_USER. */
   user: string;
-  mcpBindHost: string | null;
-  mcpBindPort: number;
-  allowedOrigins: Set<string>;
   auditLogDir: string;
   /** When true, skip TLS cert verification — DSM ships with a self-signed cert
    *  out of the box, so this defaults true. Driven by the env var
@@ -85,6 +85,11 @@ export interface Config {
   router: RouterTarget | null;
 }
 
+/** Runtime state that is regenerable but not free to lose (audit log, sessions). */
+function defaultStatePath(...parts: string[]): string {
+  return join(stateDir(), ...parts);
+}
+
 function required(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env: ${name}`);
@@ -105,30 +110,19 @@ export function envValue(name: string): string | undefined {
 
 export function loadConfig(): Config {
   const baseUrl = required("DSM_BASE_URL").replace(/\/$/, "");
-  const allowedOrigins = new Set(
-    optional(
-      "MCP_ALLOWED_ORIGINS",
-      "http://localhost,http://127.0.0.1,null"
-    )
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
+  const session = "syno-cli";
   return {
     baseUrl,
     user: optional("DSM_USER", "claude-mcp"),
-    mcpBindHost: process.env.MCP_BIND_HOST ?? null,
-    mcpBindPort: parseInt(optional("MCP_BIND_PORT", "8765"), 10),
-    allowedOrigins,
-    auditLogDir: optional(
-      "AUDIT_LOG_DIR",
-      "/volume1/docker/synology-mcp/audit"
-    ),
+    auditLogDir: optional("AUDIT_LOG_DIR", defaultStatePath("audit")),
     tlsSkipVerify: optional("TLS_REJECT_UNAUTHORIZED", "0") === "0",
-    session: "synology-mcp",
+    session,
     authVersion: 6,
     authPath: "entry.cgi",
-    sidCacheFile: process.env.DSM_SID_CACHE_FILE,
+    // Always set, unlike the daemon where this was an opt-in dev convenience.
+    // Every invocation is a fresh process, so without a session file each one
+    // would burn a login and a TOTP window. See session.ts.
+    sidCacheFile: envValue("DSM_SID_CACHE_FILE") ?? defaultSessionPath(session),
     router: parseRouter(),
   };
 }
@@ -160,6 +154,13 @@ function parseRouter(): RouterTarget | null {
  *  in-memory regardless. The back-to-back-within-30s dev case just waits a TOTP
  *  window.)
  *
+ *  The router now gets a session file too. The daemon deliberately withheld one
+ *  because SRM expires sessions faster than the 10-minute TTL, so a cached SID
+ *  went stale → 119 → re-login inside the same TOTP window → 404. That failure
+ *  mode is exactly what session.ts now handles: a re-login after a rejected SID
+ *  waits out the TOTP window rather than burning it. Withholding the cache from a
+ *  per-process CLI would instead guarantee a login on every single router call.
+ *
  *  Returns a `TargetConfig`, not a `Config`: the projected value describes the
  *  router *as a target*, so it structurally can't carry a `router` field —
  *  `makeRouterClient(routerTargetFrom(cfg))` is a compile error, not a runtime
@@ -174,6 +175,6 @@ export function routerTargetFrom(cfg: Config): TargetConfig {
     session: `${cfg.session}-router`,
     authVersion: 3,
     authPath: "auth.cgi",
-    sidCacheFile: undefined,
+    sidCacheFile: defaultSessionPath(`${cfg.session}-router`),
   };
 }
