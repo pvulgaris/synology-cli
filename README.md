@@ -1,38 +1,102 @@
-# synology-mcp
+# synology-cli
 
-MCP server for managing a Synology NAS (DSM 7). Exposes typed tools for package management, security audit, share inspection, and storage health. Designed to run as a container on the NAS itself, reachable from your Mac over Tailscale.
+`syno`, a command-line tool for a Synology NAS (DSM 7) and, optionally, an SRM router. Packages, security audit, shares and snapshots, backups, storage health, and a raw escape hatch to any DSM Web API endpoint.
 
-## What it does
+Every command prints JSON on stdout, so you can pipe it straight to `jq`. The DSM call trace goes to stderr. Exit 0 on success, 1 on failure, 2 on a usage error.
 
-- Read tools (safe to invoke): system status, storage/drive health, installed packages, available updates, package info, Security Advisor findings, users + 2FA state, firewall, DSM security settings, shares, external access (QuickConnect / DDNS / reverse proxy), certificates, notifications.
-- Write tools (gated on user confirmation): install / uninstall / update a single package, plus start/stop/restart. Refuses DSM-self updates and kernel-flagged packages.
-- Per-write audit log written to `/volume1/docker/synology-mcp/audit/YYYY-MM.jsonl`.
+## Install
 
-## What it does *not* do
+```sh
+npm install -g .
+syno --help
+```
 
-- DSM self-update, firewall rule edits, 2FA policy changes, SMB protocol changes. These appear only as findings; apply manually via the DSM UI.
+That puts `syno` on your `PATH`. Node 22 or newer.
 
-## Before you install
+## Configure
 
-This server:
-- Talks to DSM's Web API as a dedicated DSM user `claude-mcp` (must be in `administrators` because DSM 7 gates its admin APIs on that group; 2FA TOTP enforced, no shared-folder access, no SSH service — compensating controls documented in `docs/SETUP.md`).
-- Reads its credentials at startup from a 1Password service-account-scoped item.
-- Binds its HTTP endpoint to the `tailscale0` interface only — not LAN-reachable.
-- Logs every mutating call to a local JSONL audit file.
+Required:
 
-Setup steps are in [`docs/SETUP.md`](docs/SETUP.md). Each step is discrete; uninstall reverses them in order.
-
-## Footprint
-
-| What | Where |
+| Env | Meaning |
 |---|---|
-| Container image | DSM Container Manager, project `synology-mcp` |
-| Container network | host networking; binds to tailscale0 only |
-| HTTP port | 8765 (configurable) |
-| Audit log | `/volume1/docker/synology-mcp/audit/YYYY-MM.jsonl` |
-| DSM user | `claude-mcp` (admin group, 2FA, shared-folder access denied) |
-| Secrets | 1Password item titled "Synology DSM" (username `claude-mcp`) |
-| Outbound | localhost:5001 (DSM API); plus the SRM router's URL when a router target is configured |
+| `DSM_BASE_URL` | e.g. `https://nas.local:5001` |
+| `DSM_USER` | DSM account name (default `claude-mcp`) |
+| `DSM_PASSWORD` | account password |
+| `DSM_TOTP_SECRET` | TOTP seed for the account's 2FA |
+
+The account must be in the `administrators` group. DSM 7 gates its admin APIs on that membership and offers no selective grant.
+
+Every secret also accepts a `*_FILE` form (`DSM_PASSWORD_FILE`, `DSM_TOTP_SECRET_FILE`) naming a file to read it from. Setting both forms of the same secret is refused. Symlinks are refused. How the value gets there is up to you: a 0600 file, a plain export, or a launcher like `op run` or sops. There's no built-in secret-manager dependency.
+
+Optional:
+
+| Env | Meaning |
+|---|---|
+| `SRM_BASE_URL` | e.g. `https://router.local:8001`. Presence alone enables the router commands. |
+| `SRM_USER`, `SRM_PASSWORD`, `SRM_TOTP_SECRET` | router login (also `*_FILE`). Must be an SRM admin; usage is read-only. |
+| `AUDIT_LOG_DIR` | where write operations are logged. Default `~/.local/state/syno/audit/`. |
+| `TLS_REJECT_UNAUTHORIZED` | anything but `0` enforces cert validation. Defaults to skipping, since DSM ships a self-signed cert. |
+
+The DSM session is cached under `~/.local/state/syno/` so back-to-back invocations don't each burn a login and a 2FA code.
+
+## Commands
+
+Writes are marked. `syno --help` prints the same list.
+
+| Command | What it does |
+|---|---|
+| `syno status` | model, DSM version, uptime, temperature, CPU/memory load |
+| `syno storage` | volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model) |
+| `syno shares list` | shared folders with encryption, quota, recycle bin, snapshot support |
+| `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
+| `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result |
+| `syno tasks list` | DSM Task Scheduler entries |
+| `syno packages list` | installed packages with versions and running state |
+| `syno packages updates` | packages with pending updates from the Synology repo |
+| `syno packages info <name>` | publisher, description, changelog, dependencies, size |
+| `syno packages install <name>` | **write.** `[--version=X] [--accept-dependencies]` |
+| `syno packages update <name>` | **write.** update to the latest version |
+| `syno packages uninstall <name>` | **write.** requires `--keep-data`; data deletion isn't supported here |
+| `syno packages control <name> <start\|stop\|restart>` | **write.** idempotent, verified by status poll |
+| `syno security scan` | runs DSM Security Advisor and returns the failing rules |
+| `syno security settings` | web/TLS, SSH, SMB, NFS, auto-update, password policy, telemetry |
+| `syno security firewall` | firewall profiles, auto-block, per-adapter DoS protection |
+| `syno users list` | accounts: name, uid, 2FA state, expired flag, email |
+| `syno external` | QuickConnect, DDNS, App Portal, reverse proxy, port forwarding |
+| `syno notifications` | SMTP config: server, port, SSL, verify-cert, sender, recipient count |
+| `syno certificates` | certificates with derived `days_until_expiry` |
+| `syno updates` | pending updates across DSM OS, NAS packages, router OS, router packages |
+| `syno dsm update-check` | whether a DSM OS update is available (detect only) |
+| `syno router update-check` | whether an SRM router OS update is available (detect only) |
+| `syno raw <api> <method>` | any DSM endpoint. `[--version=N] [--post] [k=v ...]` |
+
+## Writes require `--yes`
+
+Any command marked **write** refuses to run without `--yes`. So does `syno raw --post`, since DSM treats POST as mutating.
+
+```sh
+syno packages update SynologyDrive --yes
+```
+
+Nothing prompts you. The flag is the confirmation.
+
+Two hard refusals: updating DSM itself and updating kernel-flagged packages. Apply those through the DSM UI. Firewall rule edits, 2FA policy changes, and SMB protocol toggles aren't implemented either; they surface as audit findings only.
+
+Uninstall always preserves package data. Actual data deletion is package-specific and belongs in the DSM UI.
+
+Every write is appended to a monthly JSONL audit log with the before/after state.
+
+## `raw`
+
+For anything without a named command:
+
+```sh
+syno raw SYNO.Core.Share get --version=1 name='"docs"'
+```
+
+Params are form-encoded and DSM JSON-parses each value, so string params need their quotes on the wire. Bools and numbers are literal; arrays and objects are JSON-stringified. Use `--` to stop flag parsing when a DSM param name collides with a CLI flag.
+
+See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, response shapes, and known API names.
 
 ## License
 
