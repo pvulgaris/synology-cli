@@ -72,11 +72,6 @@ export interface DsmOnlyCredentials {
   totpSecret: string;
 }
 
-/** The MCP's own full credential set: DSM login secrets + the wire bearer. */
-export interface Credentials extends DsmOnlyCredentials {
-  bearerToken: string;
-}
-
 /** Resolve one env prefix as a complete login-credential PAIR (password + TOTP).
  *  Returns undefined when the prefix is entirely absent — the caller MAY fall through
  *  to the next source. A HALF-set pair throws: a partial override must never silently
@@ -96,8 +91,6 @@ export function credsFromPrefix(prefix: string): DsmOnlyCredentials | undefined 
   return { password, totpSecret };
 }
 
-const MIN_BEARER_LEN = 32;
-
 /** Fail closed on missing login secrets — a blank/unset secret should refuse to
  *  start, not boot degraded. Applies to both NAS and router creds. */
 function assertDsmCreds(c: DsmOnlyCredentials, label: string): void {
@@ -109,29 +102,19 @@ function assertDsmCreds(c: DsmOnlyCredentials, label: string): void {
   }
 }
 
-/** A blank/unset bearer would otherwise degrade wire auth to the 7-char constant
- *  "Bearer " — guessable by anyone who can reach the port. */
-function assertBearer(bearerToken: string): void {
-  if (!bearerToken || bearerToken.length < MIN_BEARER_LEN) {
-    throw new Error(
-      `MCP bearer token missing or too short (${bearerToken?.length ?? 0} chars; need >= ${MIN_BEARER_LEN}). ` +
-        `Set MCP_BEARER_TOKEN or MCP_BEARER_TOKEN_FILE — a blank source degrades wire auth to a ` +
-        `guessable constant. Regenerate with: openssl rand -hex 32`
-    );
-  }
+/** The default credential loader, i.e. the NAS. A thin alias rather than its own
+ *  resolution path, so NAS and router creds can't drift. It exists because
+ *  SynoClient's credLoader contract takes no arguments.
+ *
+ *  This used to also demand a wire bearer token for the HTTP daemon. Nothing
+ *  serves HTTP now, so requiring one only made `syno` refuse to start. */
+export async function loadCredentials(): Promise<DsmOnlyCredentials> {
+  return loadDsmOnlyCredentials("DSM");
 }
 
-/** The MCP's full credentials: DSM login secrets + the wire bearer, from env/*_FILE.
- *  Async only to satisfy the SynoClient credLoader contract; the work is synchronous. */
-export async function loadCredentials(): Promise<Credentials> {
-  const bearerToken = secretFromEnv("MCP_BEARER_TOKEN") ?? "";
-  assertBearer(bearerToken);
-  return { ...(await loadDsmOnlyCredentials("DSM")), bearerToken };
-}
-
-/** Load just the login secrets (password + totp) for a target — used by the daemon
- *  and the router client (which has no bearer). Resolves the `<envPrefix>_*` pair
- *  (env or *_FILE, e.g. SRM_*) and fails closed on a blank/absent secret. */
+/** Load the login secrets (password + totp) for a target. Resolves the
+ *  `<envPrefix>_*` pair (env or *_FILE, e.g. SRM_*) and fails closed on a
+ *  blank/absent secret. */
 export async function loadDsmOnlyCredentials(envPrefix = "DSM"): Promise<DsmOnlyCredentials> {
   const creds = credsFromPrefix(envPrefix) ?? { password: "", totpSecret: "" };
   assertDsmCreds(creds, envPrefix);
