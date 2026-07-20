@@ -9,14 +9,45 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   COMMANDS,
+  UsageError,
   parseArgv,
   requiresConfirmation,
   resolveCommand,
   type Command,
+  type CommandContext,
 } from "./commands.js";
+
+const cmd = (name: string): Command => {
+  const c = COMMANDS.find((x) => x.name === name);
+  assert.ok(c, `no such command: ${name}`);
+  return c;
+};
+
+/** A CommandContext with a stub client and a throwaway audit dir. */
+function ctx(over: Partial<CommandContext> & { auditDir?: string }): CommandContext {
+  const auditLogDir = over.auditDir ?? mkdtempSync(join(tmpdir(), "syno-audit-"));
+  return {
+    cfg: { auditLogDir } as any,
+    dsm: over.dsm ?? ({ call: async () => ({ ok: true }) } as any),
+    router: over.router ?? null,
+    args: over.args ?? [],
+    flags: over.flags ?? {},
+  };
+}
+
+function auditLines(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".jsonl"))
+    .flatMap((f) => readFileSync(join(dir, f), "utf8").trim().split("\n"))
+    .filter(Boolean);
+}
 
 // ── argv parsing ────────────────────────────────────────────────────────────
 
@@ -133,4 +164,60 @@ test("registry: every command has a summary for --help", () => {
   for (const c of COMMANDS) {
     assert.ok(c.summary.length > 0, `${c.name} has no summary`);
   }
+});
+
+// ── usage errors ────────────────────────────────────────────────────────────
+
+// `run` throws synchronously; the async wrapper turns that into a rejection the
+// top-level catch in cli.ts sees as a UsageError → exit 2.
+const isUsage = (e: unknown) => e instanceof UsageError;
+
+test("usage: a missing required argument throws UsageError (→ exit 2)", async () => {
+  await assert.rejects(async () => cmd("packages info").run(ctx({ args: [] })), isUsage);
+});
+
+test("usage: an invalid control action throws UsageError", async () => {
+  await assert.rejects(
+    async () => cmd("packages control").run(ctx({ args: ["Foo", "frobnicate"] })),
+    isUsage
+  );
+});
+
+test("usage: a malformed raw param throws UsageError", async () => {
+  await assert.rejects(
+    async () => cmd("raw").run(ctx({ args: ["SYNO.Foo", "get", "notkv"] })),
+    isUsage
+  );
+});
+
+// ── raw audit ───────────────────────────────────────────────────────────────
+
+test("raw GET is a read and writes no audit record", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  await cmd("raw").run(ctx({ auditDir, args: ["SYNO.Core.System", "info"] }));
+  assert.deepEqual(auditLines(auditDir), []);
+});
+
+test("raw --post writes an audit record like a named write", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  await cmd("raw").run(
+    ctx({
+      auditDir,
+      args: ["SYNO.Docker.Project", "stop", "id=x"],
+      flags: { post: true },
+    })
+  );
+  const lines = auditLines(auditDir);
+  assert.equal(lines.length, 1, "one audit record for the raw POST");
+  const rec = JSON.parse(lines[0]);
+  assert.equal(rec.tool, "raw:SYNO.Docker.Project.stop");
+  assert.equal(rec.ok, true);
+});
+
+test("raw --post returns the DSM response, not the audit wrapper", async () => {
+  const dsm = { call: async () => ({ log: "stopped" }) } as any;
+  const out = await cmd("raw").run(
+    ctx({ dsm, args: ["SYNO.Docker.Project", "stop", "id=x"], flags: { post: true } })
+  );
+  assert.deepEqual(out, { log: "stopped" });
 });
