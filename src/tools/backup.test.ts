@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { SynoClient, DsmCallOptions } from "../dsm.js";
+import { DsmError, type SynoClient, type DsmCallOptions } from "../dsm.js";
 import { nasHyperbackupTasks, nasShareSnapshots } from "./backup.js";
 
 function fakeClient(handlers: Record<string, (opts: DsmCallOptions) => unknown>): SynoClient {
@@ -94,6 +94,26 @@ test("hyperbackup: a failing status read degrades and is marked status_available
   assert.equal(tasks[0].last_result, null);
   assert.equal(tasks[0].last_backup_ok, null);
   assert.equal(tasks[0].schedule, null); // no schedule struct → null, not a throw
+});
+
+test("hyperbackup: absent API (Hyper Backup not installed) degrades to an empty note", async () => {
+  const dsm = fakeClient({
+    "SYNO.Backup.Task.list": () => {
+      throw new DsmError("SYNO.Backup.Task", "list", 102, undefined, "no such API");
+    },
+  });
+  const out = await nasHyperbackupTasks(dsm);
+  assert.deepEqual(out.tasks, []);
+  assert.match(out.note!, /not installed/);
+});
+
+test("hyperbackup: a real error (not 102/103) still propagates", async () => {
+  const dsm = fakeClient({
+    "SYNO.Backup.Task.list": () => {
+      throw new DsmError("SYNO.Backup.Task", "list", 105, undefined, "permission");
+    },
+  });
+  await assert.rejects(() => nasHyperbackupTasks(dsm), /permission|105/);
 });
 
 test("snapshots: version 2 + additional asserted; ISO parse, immutable count, chronological newest/oldest", async () => {
