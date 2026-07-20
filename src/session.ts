@@ -21,6 +21,7 @@
 import {
   readFileSync,
   writeFileSync,
+  writeSync,
   mkdirSync,
   openSync,
   closeSync,
@@ -30,6 +31,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 
 /** TOTP step, in ms. RFC 6238's default and what DSM enforces. */
 export const TOTP_WINDOW_MS = 30_000;
@@ -38,13 +40,23 @@ export const TOTP_WINDOW_MS = 30_000;
 export const SID_TTL_MS = 10 * 60 * 1000;
 
 /**
- * How long before a lock is presumed abandoned. A login is one HTTP round-trip
- * plus a credential read, so a healthy holder releases in well under a second;
- * the generous bound is for a holder that got SIGKILLed mid-login. It must stay
- * above TOTP_WINDOW_MS, since a holder legitimately waiting out a TOTP window
- * is not stuck.
+ * Longest a healthy holder can legitimately hold the lock: it may wait out a
+ * full TOTP window (up to TOTP_WINDOW_MS) AND then make a login request that can
+ * take up to the client's request timeout. The request timeout lives in dsm.ts;
+ * duplicating its value here rather than importing keeps session.ts free of a
+ * dependency on the client, at the cost of a comment that must track it (30s).
  */
-const LOCK_STALE_MS = 45_000;
+const MAX_LOGIN_HOLD_MS = TOTP_WINDOW_MS + 30_000;
+
+/**
+ * How long before a lock is presumed abandoned and broken. Must sit safely above
+ * MAX_LOGIN_HOLD_MS, or a slow-but-healthy holder gets its lock stolen mid-login
+ * and two processes log in at once (the exact TOTP-reuse 404 the lock prevents).
+ * The margin absorbs scheduling jitter. A truly dead holder does block others for
+ * this long, but concurrent invocations are rare and the ownership check below is
+ * the real safety net; the threshold only decides how long to wait first.
+ */
+const LOCK_STALE_MS = MAX_LOGIN_HOLD_MS + 30_000; // 90s
 
 /** Poll interval while waiting for another process to release the lock. */
 const LOCK_POLL_MS = 50;
@@ -64,6 +76,22 @@ export interface SessionRecord {
   at: number;
   /** TOTP window index that produced this SID, so the next login can avoid reusing it. */
   totpWindow: number;
+  /** The target+account this SID authenticates. A DSM SID is account-scoped, so a
+   *  record whose identity doesn't match the current target must be ignored: adopting
+   *  it would run commands (writes included) as the wrong account for up to the TTL. */
+  baseUrl: string;
+  user: string;
+}
+
+/** True when a cached record authenticates the target we're about to call. A
+ *  record missing identity (an older on-disk format) never matches, which fails
+ *  safe toward a fresh login. */
+export function sessionMatches(
+  rec: SessionRecord,
+  baseUrl: string,
+  user: string
+): boolean {
+  return rec.baseUrl === baseUrl && rec.user === user;
 }
 
 /** The TOTP window index a code generated now would belong to. */
@@ -82,15 +110,33 @@ export function stateDir(): string {
   return join(base, "syno");
 }
 
-export function defaultSessionPath(session: string): string {
-  return join(stateDir(), `session-${session}.json`);
+/** Default session path, per target+account. The identity is folded into the
+ *  filename (not just validated in the record) so two accounts on one NAS get
+ *  separate files and don't invalidate each other's SIDs on every alternation.
+ *  Record validation in readSession is the backstop for a hand-set shared path. */
+export function defaultSessionPath(
+  session: string,
+  baseUrl: string,
+  user: string
+): string {
+  const tag = createHash("sha256")
+    .update(`${baseUrl}\n${user}`)
+    .digest("hex")
+    .slice(0, 8);
+  return join(stateDir(), `session-${session}-${tag}.json`);
 }
 
 export function readSession(path: string): SessionRecord | null {
   try {
     const j = JSON.parse(readFileSync(path, "utf8"));
     if (typeof j?.sid === "string" && typeof j?.at === "number") {
-      return { sid: j.sid, at: j.at, totpWindow: j.totpWindow ?? 0 };
+      return {
+        sid: j.sid,
+        at: j.at,
+        totpWindow: j.totpWindow ?? 0,
+        baseUrl: typeof j.baseUrl === "string" ? j.baseUrl : "",
+        user: typeof j.user === "string" ? j.user : "",
+      };
     }
   } catch {
     // missing, unreadable, or truncated mid-write → cache miss
@@ -125,6 +171,10 @@ export function clearSession(path: string): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Per-process counter so two locks acquired in the same millisecond by one
+ *  process still get distinct ownership tokens. */
+let lockSeq = 0;
+
 /**
  * Hold an exclusive lock for `path` while `fn` runs.
  *
@@ -132,6 +182,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * advisory locks, survives across unrelated processes without a daemon. A holder
  * that dies without releasing would deadlock every later invocation, so a lock
  * older than LOCK_STALE_MS is broken rather than waited on.
+ *
+ * Each holder writes a unique token into the lock file, and only unlinks the lock
+ * if it still holds that token. Without the check, a holder that overran staleMs
+ * (broken and replaced by another process) would unlink the SUCCESSOR's lock on
+ * its way out, letting a third process in alongside the successor and defeating
+ * the mutual exclusion.
  */
 export async function withSessionLock<T>(
   path: string,
@@ -140,6 +196,7 @@ export async function withSessionLock<T>(
 ): Promise<T> {
   const lockPath = `${path}.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
+  const token = `${process.pid}:${Date.now()}:${lockSeq++}`;
   const deadline = Date.now() + timeoutMs;
   let fd: number | null = null;
 
@@ -175,14 +232,18 @@ export async function withSessionLock<T>(
     }
   }
 
+  writeSync(fd, token);
   try {
     return await fn();
   } finally {
     closeSync(fd);
     try {
-      unlinkSync(lockPath);
+      // Only remove the lock if it is still ours. If we overran staleMs and
+      // another process broke and recreated it, its token differs and we leave
+      // it alone rather than unlink a healthy successor's lock.
+      if (readFileSync(lockPath, "utf8") === token) unlinkSync(lockPath);
     } catch {
-      // Already broken as stale by another process; nothing to undo.
+      // Gone already, or unreadable; nothing to clean up.
     }
   }
 }
