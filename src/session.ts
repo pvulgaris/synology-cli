@@ -74,8 +74,12 @@ export interface SessionRecord {
   sid: string;
   /** Epoch ms the SID was issued. Drives SID_TTL_MS expiry. */
   at: number;
-  /** TOTP window index that produced this SID, so the next login can avoid reusing it. */
-  totpWindow: number;
+  /** TOTP window index that produced this SID, so the next login can avoid reusing
+   *  it. Optional: an older on-disk record (or one written before this field
+   *  existed) has none, which reads back as `undefined` (NOT 0). Window 0 is a real
+   *  index — epoch — so 0 must stay distinct from "unknown", or a same-window
+   *  re-login would skip the wait it needs. */
+  totpWindow?: number;
   /** The target+account this SID authenticates. A DSM SID is account-scoped, so a
    *  record whose identity doesn't match the current target must be ignored: adopting
    *  it would run commands (writes included) as the wrong account for up to the TTL. */
@@ -133,7 +137,10 @@ export function readSession(path: string): SessionRecord | null {
       return {
         sid: j.sid,
         at: j.at,
-        totpWindow: j.totpWindow ?? 0,
+        // Preserve absence as undefined, not 0: 0 is a valid window index, so
+        // defaulting a missing field to 0 would let a same-window re-login skip
+        // its wait. A missing field means "unknown", which the wait treats safely.
+        totpWindow: typeof j.totpWindow === "number" ? j.totpWindow : undefined,
         baseUrl: typeof j.baseUrl === "string" ? j.baseUrl : "",
         user: typeof j.user === "string" ? j.user : "",
       };
@@ -262,7 +269,10 @@ export async function awaitFreshTotpWindow(
   lastWindow: number | undefined,
   { now = () => Date.now(), delay = sleep }: TotpWaitDeps = {}
 ): Promise<number> {
-  if (!lastWindow) return 0;
+  // `=== undefined`, not `!lastWindow`: window 0 is a real index (epoch), and a
+  // login that happened in window 0 still needs its wait. Only a genuinely
+  // unknown last window (no record field) skips.
+  if (lastWindow === undefined) return 0;
   const t = now();
   if (currentTotpWindow(t) !== lastWindow) return 0;
   const nextBoundary = (lastWindow + 1) * TOTP_WINDOW_MS;

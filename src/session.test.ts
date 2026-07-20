@@ -224,6 +224,31 @@ test("totp: no previous login means no wait", async () => {
   assert.equal(await awaitFreshTotpWindow(undefined, { delay: shouldNotSleep }), 0);
 });
 
+test("totp: window 0 is a real index, not 'no prior login'", async () => {
+  // Regression for the CursorBot finding: `!lastWindow` conflated window 0 with
+  // absent. A login recorded in window 0 (epoch) that re-logs in the same window
+  // must still wait, not skip and reuse the code.
+  let slept = -1;
+  const now = 5_000; // 5s into window 0
+  const waited = await awaitFreshTotpWindow(0, {
+    now: () => now,
+    delay: async (ms) => {
+      slept = ms;
+    },
+  });
+  assert.equal(waited, TOTP_WINDOW_MS - now + 250);
+  assert.equal(slept, TOTP_WINDOW_MS - now + 250);
+});
+
+test("session: a missing totpWindow reads back as undefined, not 0", () => {
+  const p = tmpPath();
+  writeFileSync(
+    p,
+    JSON.stringify({ sid: "abc", at: 1000, baseUrl: "b", user: "u" })
+  );
+  assert.equal(readSession(p)!.totpWindow, undefined);
+});
+
 test("totp: a login one window ago means no wait", async () => {
   const now = 1_000_000 * TOTP_WINDOW_MS;
   const waited = await awaitFreshTotpWindow(currentTotpWindow(now) - 1, {
