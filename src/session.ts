@@ -213,19 +213,25 @@ export async function withSessionLock<T>(
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
       let age = Infinity;
+      let staleToken = "";
       try {
         age = Date.now() - statSync(lockPath).mtimeMs;
+        staleToken = readFileSync(lockPath, "utf8");
       } catch {
-        // Holder released between our open and our stat — just retry the open.
+        // Holder released between our open and our stat/read — retry the open.
         continue;
       }
       if (age > staleMs) {
-        // Presumed-dead holder. unlink then retry; if a third process unlinks
-        // first, our open simply wins on the next pass.
+        // Presumed-dead holder. Break the lock ONLY if it still holds the exact
+        // token we observed as stale. If the dead holder was already cleaned up
+        // and a live process re-acquired in the gap, that process wrote a new
+        // token, so this leaves its fresh lock intact instead of deleting it (the
+        // race that would let two logins run at once). Tokens are unique per
+        // acquisition, so matching content means it's still the same dead lock.
         try {
-          unlinkSync(lockPath);
+          if (readFileSync(lockPath, "utf8") === staleToken) unlinkSync(lockPath);
         } catch {
-          // lost the race to clean up; harmless
+          // Already gone; nothing to break.
         }
         continue;
       }

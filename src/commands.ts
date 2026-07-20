@@ -75,6 +75,23 @@ export interface Command {
   run(ctx: CommandContext): Promise<unknown>;
 }
 
+/** Param keys whose values are secrets and must never reach the audit log. Matched
+ *  as case-insensitive substrings so variants (`passwd`, `otp_code`, `totp_secret`,
+ *  `api_key`) are all caught. */
+const SECRET_KEY_RE = /passw|otp|totp|secret|token|api[_-]?key|private[_-]?key|credential/i;
+
+/** Copy a param map with secret-valued keys masked. The key stays (so the audit
+ *  shows what was sent) but the value becomes "***". */
+export function redactSecrets(
+  params: Record<string, string>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params)) {
+    out[k] = SECRET_KEY_RE.test(k) ? "***" : v;
+  }
+  return out;
+}
+
 /** Positional argument or a clear error naming what was expected. */
 function arg(ctx: CommandContext, index: number, name: string): string {
   const v = ctx.args[index];
@@ -292,7 +309,12 @@ export const COMMANDS: Command[] = [
       if (!post) return call();
       return withAudit(
         ctx.cfg,
-        { tool: `raw:${api}.${method}`, args: { version, params }, before: null },
+        // Redact before recording: `raw` accepts arbitrary params, so a POST to
+        // an auth or token endpoint could carry a password or TOTP seed. The
+        // audit log persists to disk, so those must not land in it verbatim (the
+        // live DSM trace already drops them). The redacted map still shows which
+        // keys were sent.
+        { tool: `raw:${api}.${method}`, args: { version, params: redactSecrets(params) }, before: null },
         async () => ({ after: await call(), ok: true })
       ).then((r) => r.after);
     },
