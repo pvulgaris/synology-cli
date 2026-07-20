@@ -19,7 +19,7 @@
  *   snapshot-schedule config is not exposed by this API.
  */
 
-import type { SynoClient } from "../dsm.js";
+import { DsmError, type SynoClient } from "../dsm.js";
 
 // Synology C2 reports target_type "cloud_image" AND transfer_type "synocloud_swift"
 // (confirmed live). Requiring both avoids over-flagging any other cloud-image target.
@@ -54,7 +54,20 @@ function finiteNum(v: unknown): number | undefined {
 }
 
 export async function nasHyperbackupTasks(dsm: SynoClient) {
-  const list = await dsm.call({ api: "SYNO.Backup.Task", method: "list", version: 1 });
+  // Hyper Backup registers SYNO.Backup.Task; without the package installed the
+  // API is absent and DSM answers 102/103. Degrade to an honest empty result with
+  // a note rather than a hard failure, matching the router-packages pattern, so a
+  // NAS that backs up by other means (Cloud Sync, C2 via a different path) still
+  // returns cleanly. A real auth/network error still propagates.
+  let list: any;
+  try {
+    list = await dsm.call({ api: "SYNO.Backup.Task", method: "list", version: 1 });
+  } catch (err) {
+    if (err instanceof DsmError && [102, 103].includes(err.code)) {
+      return { tasks: [], note: "Hyper Backup is not installed (SYNO.Backup.Task API absent)." };
+    }
+    throw err;
+  }
   const tasks: any[] = list?.task_list ?? [];
 
   const out = await Promise.all(
