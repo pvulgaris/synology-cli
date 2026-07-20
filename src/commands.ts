@@ -38,6 +38,17 @@ import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "./tools/updates.js";
 import { routerSrmOsCheckUpdate } from "./tools/router.js";
 import { nasHyperbackupTasks, nasShareSnapshots } from "./tools/backup.js";
 import { nasTaskschedulerList } from "./tools/scheduler.js";
+import { withAudit } from "./audit.js";
+
+/** A bad invocation (missing arg, unknown value, malformed param) as opposed to a
+ *  runtime/DSM failure. The top-level catch maps this to exit 2, keeping the
+ *  documented "2 on a usage error" contract instead of collapsing everything to 1. */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UsageError";
+  }
+}
 
 export interface CommandContext {
   cfg: Config;
@@ -67,7 +78,7 @@ export interface Command {
 /** Positional argument or a clear error naming what was expected. */
 function arg(ctx: CommandContext, index: number, name: string): string {
   const v = ctx.args[index];
-  if (!v) throw new Error(`missing required argument <${name}>`);
+  if (!v) throw new UsageError(`missing required argument <${name}>`);
   return v;
 }
 
@@ -189,7 +200,7 @@ export const COMMANDS: Command[] = [
     run: (ctx) => {
       const action = arg(ctx, 1, "start|stop|restart");
       if (action !== "start" && action !== "stop" && action !== "restart") {
-        throw new Error(`invalid action "${action}" — expected start, stop, or restart`);
+        throw new UsageError(`invalid action "${action}" — expected start, stop, or restart`);
       }
       return nasPackageControl(ctx.cfg, ctx.dsm, { name: arg(ctx, 0, "name"), action });
     },
@@ -267,20 +278,23 @@ export const COMMANDS: Command[] = [
       for (const tok of ctx.args.slice(2)) {
         const eq = tok.indexOf("=");
         if (eq < 0) {
-          throw new Error(`unparsable param "${tok}" — expected k=v`);
+          throw new UsageError(`unparsable param "${tok}" — expected k=v`);
         }
         params[tok.slice(0, eq)] = tok.slice(eq + 1);
       }
       const versionFlag = strFlag(ctx, "version");
-      // POST is a write in DSM's eyes, so it goes through the same --yes gate as
-      // the named write commands; see cli.ts. A GET raw call stays free.
-      return ctx.dsm.call({
-        api,
-        method,
-        version: versionFlag ? parseInt(versionFlag, 10) : 1,
-        post: boolFlag(ctx, "post"),
-        params,
-      });
+      const version = versionFlag ? parseInt(versionFlag, 10) : 1;
+      const post = boolFlag(ctx, "post");
+      const call = () => ctx.dsm.call({ api, method, version, post, params });
+      // A GET raw call is a read and stays free. A confirmed POST mutates DSM
+      // (it already passed the --yes gate in cli.ts), so it goes through the same
+      // audit trail as the named writes rather than slipping past it.
+      if (!post) return call();
+      return withAudit(
+        ctx.cfg,
+        { tool: `raw:${api}.${method}`, args: { version, params }, before: null },
+        async () => ({ after: await call(), ok: true })
+      ).then((r) => r.after);
     },
   },
 ];

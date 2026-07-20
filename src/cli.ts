@@ -16,11 +16,20 @@ import { loadConfig } from "./config.js";
 import { SynoClient, makeRouterClient } from "./dsm.js";
 import {
   COMMANDS,
+  UsageError,
   parseArgv,
   requiresConfirmation,
   resolveCommand,
 } from "./commands.js";
 import { VERSION } from "./version.js";
+
+/** What to emit and with which code. Kept as data so the single exit path can
+ *  flush the streams before the process ends (see `finish`). */
+interface Outcome {
+  code: number;
+  stdout?: string;
+  stderr?: string;
+}
 
 function helpText(): string {
   const lines = [
@@ -49,32 +58,29 @@ function helpText(): string {
   return lines.join("\n");
 }
 
-async function main(): Promise<number> {
+async function main(): Promise<Outcome> {
   const raw = process.argv.slice(2);
   if (raw.length === 0 || raw[0] === "help" || raw[0] === "--help" || raw[0] === "-h") {
-    console.log(helpText());
-    return 0;
+    return { code: 0, stdout: helpText() };
   }
   if (raw[0] === "--version" || raw[0] === "-v") {
-    console.log(VERSION);
-    return 0;
+    return { code: 0, stdout: VERSION };
   }
 
   const { argv, flags } = parseArgv(raw);
   const resolved = resolveCommand(argv);
   if (!resolved) {
-    console.error(`Unknown command: ${argv.join(" ")}\n`);
-    console.error(helpText());
-    return 2;
+    return { code: 2, stderr: `Unknown command: ${argv.join(" ")}\n\n${helpText()}` };
   }
   const { command, args } = resolved;
 
   if (requiresConfirmation(command, flags) && !(flags.yes === true || flags.yes === "true")) {
-    console.error(
-      `Refusing to run "${command.name}" without --yes.\n` +
-        `This command changes state on the NAS. Re-run with --yes to confirm.`
-    );
-    return 2;
+    return {
+      code: 2,
+      stderr:
+        `Refusing to run "${command.name}" without --yes.\n` +
+        `This command changes state on the NAS. Re-run with --yes to confirm.`,
+    };
   }
 
   const cfg = loadConfig();
@@ -90,13 +96,35 @@ async function main(): Promise<number> {
   const router = makeRouterClient(cfg);
 
   const result = await command.run({ cfg, dsm, router, args, flags });
-  console.log(JSON.stringify(result, null, 2));
-  return 0;
+  return { code: 0, stdout: JSON.stringify(result, null, 2) };
+}
+
+/**
+ * The single exit path. `process.exit()` discards whatever is still buffered in
+ * stdout, so calling it straight after a write truncates a piped result into
+ * invalid JSON. That breaks the whole point of a CLI you pipe to jq. So each
+ * stream is drained (its write callback fires only once the data reaches the OS)
+ * before the process ends.
+ */
+function finish(outcome: Outcome): void {
+  const drain = (
+    stream: NodeJS.WriteStream,
+    text: string | undefined,
+    next: () => void
+  ) => {
+    if (text === undefined) return next();
+    stream.write(text.endsWith("\n") ? text : text + "\n", () => next());
+  };
+  drain(process.stdout, outcome.stdout, () =>
+    drain(process.stderr, outcome.stderr, () => process.exit(outcome.code))
+  );
 }
 
 main()
-  .then((code) => process.exit(code))
+  .then(finish)
   .catch((err) => {
-    console.error(`[syno] ${err?.message ?? err}`);
-    process.exit(1);
+    // A malformed invocation is exit 2 (the documented usage code); anything else
+    // is a runtime or DSM failure at exit 1. Both flush stderr before exiting.
+    const code = err instanceof UsageError ? 2 : 1;
+    finish({ code, stderr: `[syno] ${err?.message ?? err}` });
   });
