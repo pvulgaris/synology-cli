@@ -18,8 +18,6 @@
  * We do not paper over that here.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import type { Config, TargetConfig } from "./config.js";
 import { routerTargetFrom } from "./config.js";
 import {
@@ -28,8 +26,14 @@ import {
   loadDsmOnlyCredentials,
   type DsmOnlyCredentials,
 } from "./auth.js";
-
-const SID_TTL_MS = 10 * 60 * 1000; // 10 minutes
+import {
+  SID_TTL_MS,
+  awaitFreshTotpWindow,
+  currentTotpWindow,
+  readSession,
+  withSessionLock,
+  writeSession,
+} from "./session.js";
 
 // Bound every GET read (writes/POST are exempt — see callOnce). A target reachable
 // at the TCP layer but unresponsive at the application layer (a wedged SRM web
@@ -40,30 +44,6 @@ const SID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // generous; on timeout fetch rejects (AbortError, not a DsmError) and the caller's
 // catch / runSource surfaces it.
 const REQUEST_TIMEOUT_MS = 30_000;
-
-// Dev-only: persist the SID across `tsx` invocations so the harness doesn't
-// burn a TOTP code on every run. DSM rejects reuse within the same 30s window
-// with code 404 on login. In production the daemon stays up so this is a
-// no-op; the env var is set only by dev/source-creds.sh.
-function readSidCache(path: string): { sid: string; at: number } | null {
-  try {
-    const raw = readFileSync(path, "utf8");
-    const j = JSON.parse(raw);
-    if (typeof j?.sid === "string" && typeof j?.at === "number") return j;
-  } catch {
-    // missing or unparsable → treat as cache miss
-  }
-  return null;
-}
-
-function writeSidCache(path: string, sid: string): void {
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ sid, at: Date.now() }), { mode: 0o600 });
-  } catch {
-    // best-effort; dev convenience only
-  }
-}
 
 export interface DsmResponse<T = any> {
   success: boolean;
@@ -138,13 +118,16 @@ export class SynoClient {
   // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
   private loginInFlight: Promise<void> | null = null;
+  // A SID we saw rejected with 117/119. Remembered so the shared session file
+  // can't hand the same dead SID straight back to us during re-login.
+  private rejectedSid: string | null = null;
 
   constructor(private cfg: TargetConfig, opts: SynoClientOptions = {}) {
     this.readOnly = opts.readOnly ?? false;
     this.credLoader = opts.credLoader ?? loadCredentials;
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
-      const cached = readSidCache(cachePath);
+      const cached = readSession(cachePath);
       if (cached && Date.now() - cached.at < SID_TTL_MS) {
         this.sid = cached.sid;
         this.sidObtainedAt = cached.at;
@@ -167,8 +150,41 @@ export class SynoClient {
     await this.loginInFlight;
   }
 
+  /**
+   * Acquire a SID. With a session file configured this runs under a cross-process
+   * lock, because a login is the one operation two concurrent `syno` invocations
+   * must not perform at the same time: DSM rejects a second login reusing the
+   * current 30-second TOTP code with error 404.
+   *
+   * The in-process `loginInFlight` guard is still needed and not redundant with
+   * the lock — it collapses a parallel fan-out (the update digest) into one login
+   * rather than serializing it into several.
+   */
   private async login(): Promise<void> {
+    const cachePath = this.cfg.sidCacheFile;
+    if (!cachePath) return this.doLogin();
+    return withSessionLock(cachePath, async () => {
+      // Double-checked: whoever held the lock probably just logged in, so re-read
+      // before spending a TOTP window. Skip a SID we ourselves just saw rejected —
+      // adopting it would 119 straight back into this path.
+      const cached = readSession(cachePath);
+      if (
+        cached &&
+        Date.now() - cached.at < SID_TTL_MS &&
+        cached.sid !== this.rejectedSid
+      ) {
+        this.sid = cached.sid;
+        this.sidObtainedAt = cached.at;
+        return;
+      }
+      await awaitFreshTotpWindow(cached?.totpWindow);
+      await this.doLogin();
+    });
+  }
+
+  private async doLogin(): Promise<void> {
     if (!this.creds) this.creds = await this.credLoader(this.cfg);
+    const totpWindow = currentTotpWindow();
     const otpCode = currentTotpCode(this.creds.totpSecret);
     const url = new URL(`${this.cfg.baseUrl}/webapi/${this.cfg.authPath}`);
     url.searchParams.set("api", "SYNO.API.Auth");
@@ -205,8 +221,15 @@ export class SynoClient {
     }
     this.sid = body.data.sid;
     this.sidObtainedAt = Date.now();
+    this.rejectedSid = null;
     const cachePath = this.cfg.sidCacheFile;
-    if (cachePath) writeSidCache(cachePath, this.sid);
+    if (cachePath) {
+      writeSession(cachePath, {
+        sid: this.sid,
+        at: this.sidObtainedAt,
+        totpWindow,
+      });
+    }
   }
 
   /**
@@ -234,7 +257,10 @@ export class SynoClient {
         // shared re-login completed would otherwise null the fresh SID and force a
         // second login within the 30s TOTP window (→ code 404). If it already
         // changed, skip the reset and just retry with the new SID.
-        if (this.sid === sidAtCall) this.sid = null;
+        if (this.sid === sidAtCall) {
+          this.rejectedSid = sidAtCall;
+          this.sid = null;
+        }
         await this.ensureSession();
         return await this.callOnce<T>(opts);
       }
