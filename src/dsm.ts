@@ -31,8 +31,10 @@ import {
   awaitFreshTotpWindow,
   currentTotpWindow,
   readSession,
+  sessionMatches,
   withSessionLock,
   writeSession,
+  type SessionRecord,
 } from "./session.js";
 
 // Bound every GET read (writes/POST are exempt — see callOnce). A target reachable
@@ -128,11 +130,21 @@ export class SynoClient {
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
       const cached = readSession(cachePath);
-      if (cached && Date.now() - cached.at < SID_TTL_MS) {
+      if (cached && this.isUsable(cached)) {
         this.sid = cached.sid;
         this.sidObtainedAt = cached.at;
       }
     }
+  }
+
+  /** A cached record is usable only if it's fresh AND authenticates this exact
+   *  target+account. The identity check stops a SID minted for another DSM_USER
+   *  (or base URL) from being adopted here and running commands as that account. */
+  private isUsable(rec: SessionRecord): boolean {
+    return (
+      Date.now() - rec.at < SID_TTL_MS &&
+      sessionMatches(rec, this.cfg.baseUrl, this.cfg.user)
+    );
   }
 
   private async ensureSession(): Promise<void> {
@@ -168,11 +180,7 @@ export class SynoClient {
       // before spending a TOTP window. Skip a SID we ourselves just saw rejected —
       // adopting it would 119 straight back into this path.
       const cached = readSession(cachePath);
-      if (
-        cached &&
-        Date.now() - cached.at < SID_TTL_MS &&
-        cached.sid !== this.rejectedSid
-      ) {
+      if (cached && this.isUsable(cached) && cached.sid !== this.rejectedSid) {
         this.sid = cached.sid;
         this.sidObtainedAt = cached.at;
         return;
@@ -228,6 +236,8 @@ export class SynoClient {
         sid: this.sid,
         at: this.sidObtainedAt,
         totpWindow,
+        baseUrl: this.cfg.baseUrl,
+        user: this.cfg.user,
       });
     }
   }

@@ -111,9 +111,10 @@ export function envValue(name: string): string | undefined {
 export function loadConfig(): Config {
   const baseUrl = required("DSM_BASE_URL").replace(/\/$/, "");
   const session = "syno-cli";
+  const user = optional("DSM_USER", "claude-mcp");
   return {
     baseUrl,
-    user: optional("DSM_USER", "claude-mcp"),
+    user,
     auditLogDir: optional("AUDIT_LOG_DIR", defaultStatePath("audit")),
     tlsSkipVerify: optional("TLS_REJECT_UNAUTHORIZED", "0") === "0",
     session,
@@ -121,8 +122,10 @@ export function loadConfig(): Config {
     authPath: "entry.cgi",
     // Always set, unlike the daemon where this was an opt-in dev convenience.
     // Every invocation is a fresh process, so without a session file each one
-    // would burn a login and a TOTP window. See session.ts.
-    sidCacheFile: envValue("DSM_SID_CACHE_FILE") ?? defaultSessionPath(session),
+    // would burn a login and a TOTP window. Keyed on baseUrl+user so a different
+    // target or account can't adopt this one's SID. See session.ts.
+    sidCacheFile:
+      envValue("DSM_SID_CACHE_FILE") ?? defaultSessionPath(session, baseUrl, user),
     router: parseRouter(),
   };
 }
@@ -175,6 +178,10 @@ export function routerTargetFrom(cfg: Config): TargetConfig {
     session: `${cfg.session}-router`,
     authVersion: 3,
     authPath: "auth.cgi",
-    sidCacheFile: defaultSessionPath(`${cfg.session}-router`),
+    sidCacheFile: defaultSessionPath(
+      `${cfg.session}-router`,
+      cfg.router.baseUrl,
+      cfg.router.user
+    ),
   };
 }
