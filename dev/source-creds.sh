@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Source this (don't run it) once per dev shell to load DSM creds from 1Password
-# into the environment for the dev harness (deploy.ts, verify-tools.ts):
+# Source this (do not run it) once per dev shell to load DSM creds from 1Password
+# into the environment for `syno` and the dev harness:
 #
 #   source dev/source-creds.sh
 #
@@ -28,20 +28,10 @@ unset OP_SERVICE_ACCOUNT_TOKEN
 : "${DSM_OP_ITEM:=Synology DSM}"
 : "${DSM_BASE_URL:=https://nas.local:5001}"
 : "${DSM_USER:=claude-mcp}"
-# A local dev run writes its audit records to this per-user cache dir; the
-# production daemon writes to the NAS-mounted /audit instead, so a dev run's
-# writes don't land in the NAS's canonical trail.
-: "${AUDIT_LOG_DIR:=$HOME/.cache/synology-mcp/audit}"
-# Persist the DSM SID across tsx runs so we don't burn a TOTP code each process
-# (DSM rejects TOTP reuse within the 30s window with code 404). NAS only — the
-# router (SRM) deliberately gets no SID cache; SRM expires sessions faster than
-# the client TTL, so a cached SID goes stale (119 → TOTP-reuse 404).
-: "${DSM_SID_CACHE_FILE:=$HOME/.cache/synology-mcp/sid.json}"
-export DSM_OP_VAULT DSM_OP_ITEM DSM_BASE_URL DSM_USER \
-       AUDIT_LOG_DIR DSM_SID_CACHE_FILE
-# Cache dir holds the SID + audit log — keep it owner-only.
-mkdir -p "$AUDIT_LOG_DIR" "$(dirname "$DSM_SID_CACHE_FILE")" 2>/dev/null
-chmod 700 "$AUDIT_LOG_DIR" "$(dirname "$DSM_SID_CACHE_FILE")" 2>/dev/null
+# Session file and audit log are left to the CLI's own defaults under
+# ~/.local/state/syno. Overriding them here would split state across two
+# locations, so a session written by `syno` wouldn't be found by a dev run.
+export DSM_OP_VAULT DSM_OP_ITEM DSM_BASE_URL DSM_USER
 
 # Read-only service-account token (captured above) makes `op read` prompt-free;
 # injected into op only — never re-exported — so children don't inherit vault
@@ -52,10 +42,9 @@ _op() {
 }
 
 _base="op://${DSM_OP_VAULT}/${DSM_OP_ITEM}"
-DSM_PASSWORD=$(_op "${_base}/password")             || { echo "op read password failed" >&2; _optok=""; return 1; }
-DSM_TOTP_SECRET=$(_op "${_base}/totp")              || { echo "op read totp failed" >&2; _optok=""; return 1; }
-MCP_BEARER_TOKEN=$(_op "${_base}/mcp_bearer_token") || { echo "op read mcp_bearer_token failed" >&2; _optok=""; return 1; }
-export DSM_PASSWORD DSM_TOTP_SECRET MCP_BEARER_TOKEN
+DSM_PASSWORD=$(_op "${_base}/password") || { echo "op read password failed" >&2; _optok=""; return 1; }
+DSM_TOTP_SECRET=$(_op "${_base}/totp")  || { echo "op read totp failed" >&2; _optok=""; return 1; }
+export DSM_PASSWORD DSM_TOTP_SECRET
 echo "[dev] DSM creds loaded from 1Password"
 
 # Router (SRM) creds — gated on SRM_BASE_URL, the same switch config.ts uses.
