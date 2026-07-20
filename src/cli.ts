@@ -1,132 +1,102 @@
 #!/usr/bin/env node
 
 /**
- * synology-mcp — entry point.
+ * syno — command-line access to a Synology NAS (DSM 7) and SRM router.
  *
- * Subcommands:
- *   serve         Run MCP over stdio (for `claude mcp add` / claude.json or local dev).
- *   daemon        Run MCP over Streamable HTTP on the configured interface/port.
- *   bridge        stdio→HTTP proxy for Claude Desktop config (runs on the Mac).
+ * Output contract, chosen for agent use as much as human use:
+ *   - stdout is only ever the result, as JSON. Pipe it to jq without filtering.
+ *   - stderr carries the DSM call trace and any error.
+ *   - exit 0 on success, 1 on failure, 2 on a usage error.
  *
- * Required env (both modes):
- *   DSM_BASE_URL, DSM_OP_VAULT, OP_SERVICE_ACCOUNT_TOKEN
- * Required env (daemon only):
- *   MCP_BIND_HOST / MCP_BIND_PORT optional; allowlisted Origin / bearer in 1Password.
+ * Required env: DSM_BASE_URL, plus credentials (see auth.ts — env, *_FILE, or a
+ * launcher like `op run`). SRM_BASE_URL optionally adds the router.
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadConfig } from "./config.js";
-import { createServer } from "./server.js";
 import { SynoClient, makeRouterClient } from "./dsm.js";
-import { startHttpDaemon } from "./http.js";
+import {
+  COMMANDS,
+  parseArgv,
+  requiresConfirmation,
+  resolveCommand,
+} from "./commands.js";
+import { VERSION } from "./version.js";
 
-async function serveStdio() {
+function helpText(): string {
+  const lines = [
+    `syno ${VERSION} — Synology NAS from the command line`,
+    "",
+    "Usage: syno <command> [args] [--flags]",
+    "",
+    "Commands:",
+  ];
+  const width = Math.max(
+    ...COMMANDS.map((c) => `${c.name} ${c.usage ?? ""}`.trim().length)
+  );
+  for (const c of COMMANDS) {
+    const invocation = `${c.name} ${c.usage ?? ""}`.trim();
+    const mark = c.mutating ? " [write]" : "";
+    lines.push(`  ${invocation.padEnd(width)}  ${c.summary}${mark}`);
+  }
+  lines.push(
+    "",
+    "Write commands require --yes. So does `raw --post`, since DSM treats POST as mutating.",
+    "",
+    "Every command prints JSON on stdout; the DSM call trace goes to stderr.",
+    "Use `raw` for any endpoint without a named command — see docs/dsm-api-quirks.md",
+    "for the form-encoding rules (string params need JSON quotes)."
+  );
+  return lines.join("\n");
+}
+
+async function main(): Promise<number> {
+  const raw = process.argv.slice(2);
+  if (raw.length === 0 || raw[0] === "help" || raw[0] === "--help" || raw[0] === "-h") {
+    console.log(helpText());
+    return 0;
+  }
+  if (raw[0] === "--version" || raw[0] === "-v") {
+    console.log(VERSION);
+    return 0;
+  }
+
+  const { argv, flags } = parseArgv(raw);
+  const resolved = resolveCommand(argv);
+  if (!resolved) {
+    console.error(`Unknown command: ${argv.join(" ")}\n`);
+    console.error(helpText());
+    return 2;
+  }
+  const { command, args } = resolved;
+
+  if (requiresConfirmation(command, flags) && !(flags.yes === true || flags.yes === "true")) {
+    console.error(
+      `Refusing to run "${command.name}" without --yes.\n` +
+        `This command changes state on the NAS. Re-run with --yes to confirm.`
+    );
+    return 2;
+  }
+
   const cfg = loadConfig();
-  // Process-wide TLS skip for DSM's self-signed cert. We tried a per-fetch
-  // undici dispatcher in v0.2.12 but it interacted badly with Node 22's
-  // built-in fetch (intermittent "fetch failed" + silently-empty responses
-  // on some endpoints). The blast radius of process-wide skip is bounded to
-  // DSM-shaped targets: DSM at cfg.baseUrl and, when a router is configured,
-  // SRM at cfg.router.baseUrl (also self-signed). If you add a non-Synology
-  // outbound, route THAT call through a per-call verifying undici Agent
-  // (rejectUnauthorized:true) to override the global skip.
+  // Process-wide TLS skip for DSM's self-signed cert. A per-fetch undici
+  // dispatcher was tried and reverted: it interacted badly with Node's built-in
+  // fetch (intermittent "fetch failed" and silently-empty responses). The blast
+  // radius is bounded to DSM-shaped targets. Any non-Synology outbound added
+  // later must route through its own verifying Agent to override this.
   if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const dsm = new SynoClient(cfg);
   const router = makeRouterClient(cfg);
-  const server = createServer(cfg, dsm, router);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("[serve] synology-mcp ready on stdio");
+
+  const result = await command.run({ cfg, dsm, router, args, flags });
+  console.log(JSON.stringify(result, null, 2));
+  return 0;
 }
 
-async function serveHttp() {
-  const cfg = loadConfig();
-  if (cfg.tlsSkipVerify) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
-  await startHttpDaemon(cfg);
-}
-
-/**
- * Bridge subcommand: a tiny stdio MCP server that proxies to the HTTP daemon.
- * Use this from Claude Desktop's claude_desktop_config.json (stdio-only — not a
- * direct HTTP URL; Custom Connectors are cloud-brokered and don't fit tailnet
- * bearer auth). The bridge runs on your Mac, the daemon runs on the NAS.
- *
- * Required env (set in claude_desktop_config.json under "env"):
- *   MCP_BRIDGE_URL    e.g. http://nas.local:8765/mcp
- *   MCP_BRIDGE_TOKEN  the bearer token (the same one used by claude mcp add)
- */
-async function bridge() {
-  const url = process.env.MCP_BRIDGE_URL;
-  const token = process.env.MCP_BRIDGE_TOKEN;
-  if (!url || !token) {
-    console.error(
-      "[bridge] missing MCP_BRIDGE_URL or MCP_BRIDGE_TOKEN env var"
-    );
-    process.exit(2);
-  }
-  const upstream = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+main()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error(`[syno] ${err?.message ?? err}`);
+    process.exit(1);
   });
-  const downstream = new StdioServerTransport();
-
-  // Client → server forwarding. Two safety rules:
-  //   1. Swallow `notifications/*` from the client. The HTTP daemon is
-  //      stateless, so client-side handshake notifications like
-  //      `notifications/initialized` have nothing to update and the SDK
-  //      throws 500 trying to handle them. Filtering at the bridge keeps
-  //      the daemon clean and Claude Desktop happy.
-  //   2. .catch any send rejection. Unhandled promise rejections kill the
-  //      Node process on v22+, which manifested as "Connection closed" on
-  //      every spawn after the first.
-  downstream.onmessage = (msg) => {
-    const m = msg as any;
-    if (m && typeof m.method === "string" && m.method.startsWith("notifications/")) {
-      return;
-    }
-    upstream.send(msg).catch((err) => {
-      console.error("[bridge] upstream send failed:", err?.message ?? err);
-    });
-  };
-  upstream.onmessage = (msg) => {
-    downstream.send(msg).catch((err) => {
-      console.error("[bridge] downstream send failed:", err?.message ?? err);
-    });
-  };
-  upstream.onclose = () => downstream.close();
-  downstream.onclose = () => upstream.close();
-  upstream.onerror = (err) => console.error("[bridge] upstream:", err?.message ?? err);
-  downstream.onerror = (err) => console.error("[bridge] downstream:", err?.message ?? err);
-
-  await Promise.all([upstream.start(), downstream.start()]);
-}
-
-async function main() {
-  const cmd = process.argv[2] ?? "serve";
-  switch (cmd) {
-    case "serve":
-      await serveStdio();
-      break;
-    case "daemon":
-      await serveHttp();
-      break;
-    case "bridge":
-      await bridge();
-      break;
-    default:
-      console.error(
-        `Unknown command: ${cmd}. Use 'serve' (stdio direct), 'daemon' (HTTP), ` +
-          `or 'bridge' (stdio→HTTP proxy).`
-      );
-      process.exit(2);
-  }
-}
-
-main().catch((err) => {
-  console.error("[fatal]", err);
-  process.exit(1);
-});
