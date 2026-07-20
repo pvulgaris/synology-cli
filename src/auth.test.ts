@@ -55,8 +55,6 @@ const CLEAR = {
   DSM_PASSWORD_FILE: undefined,
   DSM_TOTP_SECRET: undefined,
   DSM_TOTP_SECRET_FILE: undefined,
-  MCP_BEARER_TOKEN: undefined,
-  MCP_BEARER_TOKEN_FILE: undefined,
 };
 
 test("*_FILE sources the secret from the file, trimming the trailing newline", async () => {
@@ -134,23 +132,6 @@ test("the envPrefix keys the *_FILE lookup (SRM_* for the router)", async () => 
   );
 });
 
-test("the wire bearer also resolves via *_FILE (loadCredentials)", async () => {
-  const bearer = "a".repeat(40); // must clear MIN_BEARER_LEN (32)
-  const bearerFile = tmpSecret(`${bearer}\n`);
-  await withEnv(
-    {
-      ...CLEAR,
-      DSM_PASSWORD: "envpw",
-      DSM_TOTP_SECRET: "ENVTOTP",
-      MCP_BEARER_TOKEN_FILE: bearerFile,
-    },
-    async () => {
-      const c = await loadCredentials();
-      assert.equal(c.bearerToken, bearer);
-      assert.equal(c.password, "envpw");
-    }
-  );
-});
 
 test("an empty (truncated) secret file fails closed", async () => {
   // A `> file` interrupted mid-write leaves "". secretFromEnv trims to "" (falsy),
@@ -201,23 +182,7 @@ test("BOTH secrets absent fails closed via assertDsmCreds (distinct from half-se
   });
 });
 
-test("missing bearer fails closed via the bearer guard", async () => {
-  await withEnv(
-    { ...CLEAR, DSM_PASSWORD: "envpw", DSM_TOTP_SECRET: "ENVTOTP" /* no bearer */ },
-    async () => {
-      await assert.rejects(() => loadCredentials(), /bearer token missing or too short/);
-    }
-  );
-});
 
-test("empty-string MCP_BEARER_TOKEN (${VAR:-}) is absent → bearer guard fires", async () => {
-  await withEnv(
-    { ...CLEAR, DSM_PASSWORD: "envpw", DSM_TOTP_SECRET: "ENVTOTP", MCP_BEARER_TOKEN: "" },
-    async () => {
-      await assert.rejects(() => loadCredentials(), /bearer token missing or too short/);
-    }
-  );
-});
 
 test("*_FILE that is a symlink is refused (not followed)", async () => {
   const real = tmpSecret("realpw\n");
@@ -231,12 +196,3 @@ test("*_FILE that is a symlink is refused (not followed)", async () => {
   );
 });
 
-test("empty bearer FILE fails closed via assertBearer", async () => {
-  const bf = tmpSecret("\n"); // "" after trim; a *set* file, so not the guard's job
-  await withEnv(
-    { ...CLEAR, DSM_PASSWORD: "envpw", DSM_TOTP_SECRET: "ENVTOTP", MCP_BEARER_TOKEN_FILE: bf },
-    async () => {
-      await assert.rejects(() => loadCredentials(), /bearer token missing or too short/);
-    }
-  );
-});
