@@ -17,6 +17,7 @@ import {
   COMMANDS,
   UsageError,
   parseArgv,
+  redactSecrets,
   requiresConfirmation,
   resolveCommand,
   type Command,
@@ -220,4 +221,39 @@ test("raw --post returns the DSM response, not the audit wrapper", async () => {
     ctx({ dsm, args: ["SYNO.Docker.Project", "stop", "id=x"], flags: { post: true } })
   );
   assert.deepEqual(out, { log: "stopped" });
+});
+
+test("redactSecrets masks credential-shaped keys, keeps the rest", () => {
+  const r = redactSecrets({
+    passwd: "hunter2",
+    otp_code: "123456",
+    totp_secret: "SEED",
+    api_key: "k",
+    token: "t",
+    id: "SynologyDrive",
+    name: "x",
+  });
+  assert.equal(r.passwd, "***");
+  assert.equal(r.otp_code, "***");
+  assert.equal(r.totp_secret, "***");
+  assert.equal(r.api_key, "***");
+  assert.equal(r.token, "***");
+  assert.equal(r.id, "SynologyDrive"); // non-secret preserved
+  assert.equal(r.name, "x");
+});
+
+test("raw --post never writes a secret param value to the audit log", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  await cmd("raw").run(
+    ctx({
+      auditDir,
+      args: ["SYNO.API.Auth", "login", "account=x", "passwd=hunter2"],
+      flags: { post: true },
+    })
+  );
+  const line = auditLines(auditDir)[0];
+  assert.doesNotMatch(line, /hunter2/, "the password must not appear in the audit record");
+  const rec = JSON.parse(line);
+  assert.equal(rec.args.params.passwd, "***");
+  assert.equal(rec.args.params.account, "x"); // non-secret still recorded
 });
