@@ -111,3 +111,20 @@ params. Those codes read like a missing or malformed parameter and aren't. Addin
 **Per-snapshot immutability** (`immutable`, `immutable_days`, `immutable_until`, `scheduled`,
 `user_locked`) comes from `SYNO.Core.Share.Snapshot list` at **v2**, which `syno shares snapshots`
 already wraps.
+
+## `SYNO.Docker.Image` delete wants plural `tags`, an array
+
+`SYNO.Docker.Image` `delete` (v1) takes `images` as a JSON-stringified array of objects, form-encoded
+in one field. The object needs `repository` and **`tags`** (plural, an array), matching the shape
+`list` returns:
+
+```
+images=[{"repository":"synology-mcp","tags":["0.4.0"]}]
+```
+
+Singular `tag` is the trap: DSM accepts it, returns `{success:true, data:{}}`, and deletes nothing
+(the handler iterates an empty `tags`). Every other selector key (`image=`, `name=`, `reference=`)
+returns 114, so `images` is the only recognized key; the object shape inside is what bites. Mutating
+`Docker.*` calls also need the `X-SYNO-TOKEN` header (login with `enable_syno_token=yes`, which yields
+a token-bound session that then 119s any plain `_sid` call, so send the token on the `list` too). An
+image referenced by any container, running or stopped, can't be deleted.

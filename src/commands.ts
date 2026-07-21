@@ -36,7 +36,11 @@ import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
 import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "./tools/updates.js";
 import { routerSrmOsCheckUpdate } from "./tools/router.js";
-import { nasHyperbackupTasks, nasShareSnapshots } from "./tools/backup.js";
+import {
+  nasHyperbackupTasks,
+  nasShareSnapshots,
+  nasShareSnapshotConfig,
+} from "./tools/backup.js";
 import { nasTaskschedulerList } from "./tools/scheduler.js";
 import { withAudit } from "./audit.js";
 
@@ -144,6 +148,13 @@ export const COMMANDS: Command[] = [
       "Btrfs snapshots for one share: timestamps, immutable/WORM lock state and window, newest/oldest, immutable count.",
     usage: "<share>",
     run: (ctx) => nasShareSnapshots(ctx.dsm, { share: arg(ctx, 0, "share") }),
+  },
+  {
+    name: "shares snapshot-config",
+    summary:
+      "Snapshot task config for one share: schedule (enabled, time, days, next run) and retention (Smart Recycle counts, retain days).",
+    usage: "<share>",
+    run: (ctx) => nasShareSnapshotConfig(ctx.dsm, { share: arg(ctx, 0, "share") }),
   },
 
   // ── Backup & scheduled tasks ──────────────────────────────────────────────

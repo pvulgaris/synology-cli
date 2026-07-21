@@ -133,6 +133,85 @@ export async function nasHyperbackupTasks(dsm: SynoClient) {
   return { tasks: out };
 }
 
+/** Parse DSM's `week_name` ("0,1,2,3,4,5,6", Sunday=0) into an int array. */
+function parseWeekDays(week: unknown): number[] {
+  if (typeof week !== "string" || !week) return [];
+  return week
+    .split(",")
+    .map((d) => Number(d))
+    .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+}
+
+/**
+ * Snapshot TASK config for a share: the schedule (when snapshots are taken) and
+ * the retention policy (how long they're kept). Distinct from `nasShareSnapshots`,
+ * which lists the snapshots themselves.
+ *
+ * Source is `SYNO.Core.Share get` with `additional=["snapshot_info"]`, not the
+ * Snapshot or Snapshot Replication APIs: `SYNO.Core.Share.Snapshot` only lists
+ * snapshots (its config methods 103), and the Btrfs.Replica / Replica.Share APIs
+ * are replication, not local-snapshot config (verified 2026-07). There is no
+ * task-level immutability field here; per-snapshot WORM lock state comes from
+ * `nasShareSnapshots`, so this returns a pointer rather than a lock flag.
+ */
+export async function nasShareSnapshotConfig(dsm: SynoClient, args: { share: string }) {
+  const data = await dsm.call({
+    api: "SYNO.Core.Share",
+    method: "get",
+    version: 1,
+    params: { name: args.share, additional: '["snapshot_info"]' },
+  });
+
+  const info = data?.snapshot_info;
+  if (!info) {
+    // A share without Btrfs snapshot support has no snapshot_info at all.
+    return {
+      share: args.share,
+      snapshot_capable: false,
+      note: "No snapshot config — the share does not support Btrfs snapshots.",
+    };
+  }
+
+  const sched = info.schedule ?? {};
+  const ret = info.retention ?? {};
+  const hour = sched.hour;
+  const min = sched.min;
+
+  return {
+    share: args.share,
+    snapshot_capable: true,
+    schedule: {
+      // next_trigger_time is DSM's own "this schedule will run again" signal, so
+      // its presence is the reliable enabled flag — there is no separate boolean.
+      enabled: Boolean(sched.next_trigger_time),
+      time:
+        hour != null && min != null
+          ? `${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")}`
+          : null,
+      week_days: parseWeekDays(sched.week_name),
+      next_run: sched.next_trigger_time || null,
+    },
+    retention: {
+      // The adv* fields are the Smart Recycle (Grandfather-Father-Son) tier counts.
+      smart_recycle: {
+        hourly: finiteNum(ret.advHourly),
+        daily: finiteNum(ret.advDaily),
+        weekly: finiteNum(ret.advWeekly),
+        monthly: finiteNum(ret.advMonthly),
+        yearly: finiteNum(ret.advYearly),
+      },
+      retain_days: finiteNum(ret.retainDay),
+      // policyType is DSM's raw retention-mode code; passed through rather than
+      // decoded, since the mapping isn't documented and mislabeling a retention
+      // mode in an audit is worse than leaving it raw. Read it in the DSM UI to
+      // confirm the mode.
+      policy_type: finiteNum(ret.policyType),
+    },
+    snapshot_count: (info.snapshots ?? []).length,
+    note: "Per-snapshot immutability (WORM lock) is reported by `syno shares snapshots <share>`, not here.",
+  };
+}
+
 export async function nasShareSnapshots(dsm: SynoClient, args: { share: string }) {
   const data = await dsm.call({
     api: "SYNO.Core.Share.Snapshot",

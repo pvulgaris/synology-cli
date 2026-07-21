@@ -9,7 +9,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DsmError, type SynoClient, type DsmCallOptions } from "../dsm.js";
-import { nasHyperbackupTasks, nasShareSnapshots } from "./backup.js";
+import {
+  nasHyperbackupTasks,
+  nasShareSnapshots,
+  nasShareSnapshotConfig,
+} from "./backup.js";
 
 function fakeClient(handlers: Record<string, (opts: DsmCallOptions) => unknown>): SynoClient {
   const call = async (opts: DsmCallOptions): Promise<unknown> => {
@@ -114,6 +118,60 @@ test("hyperbackup: a real error (not 102/103) still propagates", async () => {
     },
   });
   await assert.rejects(() => nasHyperbackupTasks(dsm), /permission|105/);
+});
+
+test("snapshot-config: reads schedule + Smart Recycle retention from Share.get snapshot_info", async () => {
+  const dsm = fakeClient({
+    "SYNO.Core.Share.get": (o) => {
+      assert.equal(o.version, 1);
+      assert.equal(o.params?.name, "arq");
+      assert.match(String(o.params?.additional), /snapshot_info/);
+      return {
+        snapshot_info: {
+          schedule: {
+            hour: 4,
+            min: 30,
+            week_name: "0,1,2,3,4,5,6",
+            next_trigger_time: "2026-07-22 04:30",
+          },
+          retention: {
+            advHourly: 24, advDaily: 7, advWeekly: 2, advMonthly: 1, advYearly: 0,
+            retainDay: 7, policyType: 128,
+          },
+          snapshots: [{}, {}, {}],
+        },
+      };
+    },
+  });
+  const out = await nasShareSnapshotConfig(dsm, { share: "arq" });
+  assert.equal(out.snapshot_capable, true);
+  assert.equal(out.schedule!.enabled, true); // next_trigger_time present
+  assert.equal(out.schedule!.time, "04:30");
+  assert.deepEqual(out.schedule!.week_days, [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(out.retention!.smart_recycle, { hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0 });
+  assert.equal(out.retention!.retain_days, 7);
+  assert.equal(out.snapshot_count, 3);
+});
+
+test("snapshot-config: a disabled schedule (no next_trigger_time) reads enabled:false", async () => {
+  const dsm = fakeClient({
+    "SYNO.Core.Share.get": () => ({
+      snapshot_info: { schedule: { hour: 4, min: 30, week_name: "1,3,5" }, retention: {}, snapshots: [] },
+    }),
+  });
+  const out = await nasShareSnapshotConfig(dsm, { share: "arq" });
+  assert.equal(out.schedule!.enabled, false);
+  assert.equal(out.schedule!.next_run, null);
+  assert.deepEqual(out.schedule!.week_days, [1, 3, 5]);
+});
+
+test("snapshot-config: a share without snapshot support degrades, doesn't throw", async () => {
+  const dsm = fakeClient({
+    "SYNO.Core.Share.get": () => ({ name: "plain", vol_path: "/volume1" }), // no snapshot_info
+  });
+  const out = await nasShareSnapshotConfig(dsm, { share: "plain" });
+  assert.equal(out.snapshot_capable, false);
+  assert.match(out.note!, /does not support/);
 });
 
 test("snapshots: version 2 + additional asserted; ISO parse, immutable count, chronological newest/oldest", async () => {
