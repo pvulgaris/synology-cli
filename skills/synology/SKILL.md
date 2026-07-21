@@ -30,7 +30,7 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno packages updates` | pending updates (excluding DSM itself) |
 | `syno packages info <name>` | metadata for one package (publisher, changelog, deps) |
 | `syno security scan` | Security Advisor check counts + the failing rules (passes/skips are counted, not listed) |
-| `syno users list` | accounts, 2FA on/off, expired flag |
+| `syno users list` | accounts: 2FA on/off, computed `active` boolean (the CLI reads DSM's `expired` field so you don't have to), raw `expired` |
 | `syno security firewall` | rules, auto-block, per-adapter DoS protection |
 | `syno security settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, NFS, auto-update, password policy, Active Insight |
 | `syno shares list` | shares incl. encryption, quota (mb used/total), recycle-bin, snapshot support |
@@ -129,9 +129,9 @@ When composing security-audit output, attach a stable `id: synology.<category>.<
 | `synology.dsm.default_dsm_ports` | `web_hardening.http_port === 5000` or `https_port === 5001` |
 | `synology.smb.smb1_enabled` | `smb.min_protocol === 0` (DSM enum is 0-indexed: 0=SMB1, 1=SMB2, 2=SMB2+LargeMTU, 3=SMB3, so a `min_protocol` of 1 is SMB2 and is **not** a finding) |
 | `synology.ssh.enabled` | `ssh_enabled === true` (mostly an observation; flag if the network ACL isn't tight) |
-| `synology.users.admin_active` | user `admin` not in expired state |
-| `synology.users.guest_active` | user `guest` not in expired state |
-| `synology.users.no_2fa` | per-user finding when `otp_enabled === false` on a non-disabled account |
+| `synology.users.admin_active` | user `admin` with `active === true`. The CLI computes `active` from DSM's `expired` field, so read the boolean; don't re-interpret `expired` here |
+| `synology.users.guest_active` | user `guest` with `active === true` |
+| `synology.users.no_2fa` | per-user finding when `otp_enabled === false` AND `active === true`. If a user carries `active_indeterminate: true` (the CLI couldn't classify its `expired` value), still raise the finding and say the account state needs a manual check |
 | `synology.notifications.no_recipients` | `mail.recipients_count === 0` while `mail.enabled === true` |
 | `synology.notifications.smtp_verify_cert_off` | `mail.verify_cert === false` |
 | `synology.shares.no_encryption` | per-share when `encryption === 0` and the share holds user data |

@@ -93,6 +93,29 @@ export async function nasSecurityAdvisorScan(dsm: SynoClient) {
 // DSM 7 returns additional[] fields flat on each user object (not nested).
 // `expired` is a string: "normal" or "now"; pass through and let the consumer
 // interpret rather than guessing at boolean semantics.
+/**
+ * Decide whether a DSM account is active from its `expired` field, so the audit
+ * doesn't depend on a model parsing the raw value. Two values are classified:
+ *   "normal" → active, no expiration
+ *   "now"    → disabled / expired (this is how "Disable this account" manifests)
+ *
+ * DSM is understood to also express a *scheduled* expiration as a date in this
+ * field, but the exact format isn't confirmed against a live DSM (this account
+ * set only ever shows "normal"/"now"), and even a known date couldn't be judged
+ * reliably without the NAS's timezone. So anything that isn't one of the two
+ * known sentinels fails toward active AND flags itself `indeterminate`, rather
+ * than guessing. `Date.parse` is deliberately NOT used: it reads "0", "1", or
+ * "2026" as valid past dates and would silently mark such an account disabled,
+ * suppressing its findings. See docs/dsm-api-quirks.md ("`expired` field").
+ */
+export function userActive(
+  expired: unknown
+): { active: boolean; indeterminate: boolean } {
+  if (expired === "normal") return { active: true, indeterminate: false };
+  if (expired === "now") return { active: false, indeterminate: false };
+  return { active: true, indeterminate: true };
+}
+
 export async function nasUsersList(dsm: SynoClient) {
   const data = await dsm.call({
     api: "SYNO.Core.User",
@@ -109,17 +132,26 @@ export async function nasUsersList(dsm: SynoClient) {
     },
   });
   return {
-    users: (data?.users ?? []).map((u: any) => ({
-      name: u.name,
-      description: u.description,
-      email: u.email,
-      expired: u.expired,
-      otp_enabled: u["2fa_status"],
-      cannot_change_password: u.cannot_chg_passwd,
-      password_never_expire: u.passwd_never_expire,
-      password_last_change: u.password_last_change,
-      groups: u.groups,
-    })),
+    users: (data?.users ?? []).map((u: any) => {
+      const { active, indeterminate } = userActive(u.expired);
+      return {
+        name: u.name,
+        description: u.description,
+        email: u.email,
+        // `active` is the derived, audit-ready flag; `expired` is kept raw for
+        // transparency. Consumers should branch on `active`, not re-parse `expired`.
+        active,
+        // Present only when the expired value couldn't be classified, so an audit
+        // can flag it for a human rather than trust a fail-open default silently.
+        ...(indeterminate ? { active_indeterminate: true } : {}),
+        expired: u.expired,
+        otp_enabled: u["2fa_status"],
+        cannot_change_password: u.cannot_chg_passwd,
+        password_never_expire: u.passwd_never_expire,
+        password_last_change: u.password_last_change,
+        groups: u.groups,
+      };
+    }),
   };
 }
 
