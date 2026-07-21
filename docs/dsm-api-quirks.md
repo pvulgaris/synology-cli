@@ -36,6 +36,16 @@ The biggest footgun: where `additional[]` keys appear in the response varies by 
 
 Always probe with `DEBUG_DSM_RESPONSES=1` and look at the raw shape before mapping fields.
 
+**`SYNO.Core.User.list` `expired` field — dated form is unverified.** Known values are `"normal"`
+(active) and `"now"` (disabled; this is how "Disable this account" manifests). DSM is understood to
+also put a *date* here for a scheduled expiration, but the exact format has never been observed on a
+live DSM, and a date-only value can't be judged reliably without the NAS's timezone. So `userActive`
+(`tools/security.ts`) classifies only the two known sentinels and flags everything else
+`active_indeterminate` rather than guessing. Do NOT reach for `Date.parse` here: it reads `"0"`,
+`"1"`, `"2026"` as valid past dates and would silently mark such an account disabled, suppressing the
+audit findings this is meant to make reliable. If the dated format is ever confirmed live, classify it
+with a strict format check plus a whole-day, timezone-safe comparison, not `Date.parse`.
+
 **`SYNO.Core.Package.Server.list` (the catalog, not the installed-package list) uses its own field
 names, not the ones you'd guess from `Package.list` or the Package Center UI's labels:** display
 name is `dname` (not `name`), publisher is `maintainer` (not `publisher`), description is `desc`
