@@ -35,6 +35,7 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno security settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, NFS, auto-update, password policy, Active Insight |
 | `syno shares list` | shares incl. encryption, quota (mb used/total), recycle-bin, snapshot support |
 | `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
+| `syno shares snapshot-config <share>` | snapshot task config: schedule (enabled, time, days, next run) + retention (Smart Recycle counts, retain days). Per-snapshot lock state is in `shares snapshots`, not here |
 | `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result. Returns `{ tasks: [], note }` if Hyper Backup isn't installed, not an error |
 | `syno tasks list` | DSM Task Scheduler entries |
 | `syno external` | QuickConnect, DDNS, App Portal HTTPS-per-app, reverse-proxy rules, port forwarding |

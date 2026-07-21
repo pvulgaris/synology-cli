@@ -49,6 +49,7 @@ Writes are marked. `syno --help` prints the same list.
 | `syno storage` | volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model) |
 | `syno shares list` | shared folders with encryption, quota, recycle bin, snapshot support |
 | `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
+| `syno shares snapshot-config <share>` | snapshot task config: schedule and Smart Recycle retention |
 | `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result |
 | `syno tasks list` | DSM Task Scheduler entries |
 | `syno packages list` | installed packages with versions and running state |
