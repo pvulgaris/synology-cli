@@ -11,7 +11,11 @@
 import { loadConfig } from "../config.js";
 import { SynoClient, makeRouterClient } from "../dsm.js";
 import { nasStatus, nasStorageHealth } from "../tools/system.js";
-import { nasHyperbackupTasks, nasShareSnapshots } from "../tools/backup.js";
+import {
+  nasHyperbackupTasks,
+  nasShareSnapshotConfig,
+  nasShareSnapshots,
+} from "../tools/backup.js";
 import { nasTaskschedulerList } from "../tools/scheduler.js";
 import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "../tools/updates.js";
 import { routerSrmOsCheckUpdate } from "../tools/router.js";
@@ -34,6 +38,10 @@ const SUITE: Record<string, (dsm: SynoClient) => Promise<unknown>> = {
   nas_status: nasStatus,
   nas_storage_health: nasStorageHealth,
   nas_hyperbackup_tasks: nasHyperbackupTasks,
+  nas_share_snapshot_config: (dsm) =>
+    nasShareSnapshotConfig(dsm, {
+      share: process.env.VERIFY_SNAPSHOT_SHARE || "backups",
+    }),
   nas_share_snapshots: (dsm) =>
     nasShareSnapshots(dsm, { share: process.env.VERIFY_SNAPSHOT_SHARE || "backups" }),
   nas_taskscheduler_list: nasTaskschedulerList,
@@ -90,6 +98,13 @@ const ASSERTIONS: Record<string, (out: any) => string | null> = {
       return "is_c2 not populated (target_type missing?)";
     if (!o.tasks.some((t: any) => t.schedule?.time || t.last_result != null))
       return "no task has schedule or last_result (status additional[] not unpacked?)";
+    return null;
+  },
+  nas_share_snapshot_config: (o) => {
+    if (o.snapshot_capable !== true) return "share is not snapshot capable";
+    if (typeof o.schedule?.enabled !== "boolean") return "schedule.enabled not bool";
+    if (typeof o.retention?.policy_type !== "number")
+      return "retention.policy_type not numeric";
     return null;
   },
   nas_taskscheduler_list: (o) => {
