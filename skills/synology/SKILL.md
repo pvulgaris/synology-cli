@@ -1,6 +1,6 @@
 ---
 name: synology
-description: Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, package updates / research / installation / removal, or security posture.
+description: "Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, package updates / research / installation / removal, or security posture."
 ---
 
 # Synology NAS
