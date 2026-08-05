@@ -24,7 +24,7 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 _optok="${OP_SERVICE_ACCOUNT_TOKEN:-}"
 unset OP_SERVICE_ACCOUNT_TOKEN
 
-: "${DSM_OP_VAULT:=Claude}"
+: "${DSM_OP_VAULT:=Agents}"
 : "${DSM_OP_ITEM:=Synology DSM}"
 : "${DSM_BASE_URL:=https://nas.local:5001}"
 : "${DSM_USER:=claude-mcp}"
