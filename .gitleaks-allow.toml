@@ -1,0 +1,17 @@
+# Exemptions that are true for THIS repo only. The pre-commit hook appends this
+# file to ~/.config/gitleaks/config.toml when it scans this repo, so nothing
+# here affects any other one. Only `[[allowlists]]` blocks belong here.
+
+# This tool talks to a NAS and a router, so its docs, defaults, and tests have
+# to name one. `nas.local` and `router.local` are the device class, not a
+# machine: mDNS resolves them to whatever answers on the caller's own LAN, so
+# they say nothing about this network. They are also the values a reader is
+# meant to copy.
+#
+# Scoped to those two names. Any other `.local` hostname still fires, which is
+# the case that would name a specific machine here.
+[[allowlists]]
+description = "generic mDNS device names used as documentation defaults"
+targetRules = ["mdns-hostname"]
+regexTarget = "match"
+regexes = ['''(?:^|[^.\w-])(?:nas|router)\.local(?:[^.\w-]|$)''']
