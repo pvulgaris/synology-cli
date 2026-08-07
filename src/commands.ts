@@ -14,6 +14,11 @@
 
 import type { Config } from "./config.js";
 import type { SynoClient } from "./dsm.js";
+import {
+  dsmMethodMayMutate,
+  isSensitiveParamKey,
+  redactSensitiveValues,
+} from "./dsm.js";
 import { nasStatus, nasStorageHealth } from "./tools/system.js";
 import {
   nasPackagesList,
@@ -42,6 +47,16 @@ import {
   nasShareSnapshotConfig,
 } from "./tools/backup.js";
 import { nasTaskschedulerList } from "./tools/scheduler.js";
+import {
+  nasContainerControl,
+  nasContainerImagesList,
+  nasContainerLogs,
+  nasContainerProjectDeploy,
+  nasContainerProjectInfo,
+  nasContainerProjectsList,
+  nasContainerRemove,
+  nasContainersList,
+} from "./tools/containers.js";
 import { withAudit } from "./audit.js";
 
 /** A bad invocation (missing arg, unknown value, malformed param) as opposed to a
@@ -79,11 +94,6 @@ export interface Command {
   run(ctx: CommandContext): Promise<unknown>;
 }
 
-/** Param keys whose values are secrets and must never reach the audit log. Matched
- *  as case-insensitive substrings so variants (`passwd`, `otp_code`, `totp_secret`,
- *  `api_key`) are all caught. */
-const SECRET_KEY_RE = /passw|otp|totp|secret|token|api[_-]?key|private[_-]?key|credential/i;
-
 /** Copy a param map with secret-valued keys masked. The key stays (so the audit
  *  shows what was sent) but the value becomes "***". */
 export function redactSecrets(
@@ -91,7 +101,7 @@ export function redactSecrets(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
-    out[k] = SECRET_KEY_RE.test(k) ? "***" : v;
+    out[k] = isSensitiveParamKey(k) ? "***" : v;
   }
   return out;
 }
@@ -111,6 +121,16 @@ function boolFlag(ctx: CommandContext, name: string): boolean {
 function strFlag(ctx: CommandContext, name: string): string | undefined {
   const v = ctx.flags[name];
   return typeof v === "string" ? v : undefined;
+}
+
+function intFlag(ctx: CommandContext, name: string): number | undefined {
+  const raw = strFlag(ctx, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) {
+    throw new UsageError(`--${name} must be an integer`);
+  }
+  return value;
 }
 
 function requireRouter(ctx: CommandContext): SynoClient {
@@ -168,6 +188,80 @@ export const COMMANDS: Command[] = [
     name: "tasks list",
     summary: "DSM Task Scheduler entries with schedule and script notification config.",
     run: ({ dsm }) => nasTaskschedulerList(dsm),
+  },
+
+  // ── Container Manager ───────────────────────────────────────────────────
+  {
+    name: "containers list",
+    summary: "Container Manager containers with image, state, health, exit code, and restart count.",
+    run: ({ dsm }) => nasContainersList(dsm),
+  },
+  {
+    name: "containers logs",
+    summary: "Recent logs for one container in chronological order.",
+    usage: "<name> [--limit=N]",
+    run: (ctx) =>
+      nasContainerLogs(ctx.dsm, {
+        name: arg(ctx, 0, "name"),
+        limit: intFlag(ctx, "limit"),
+      }),
+  },
+  {
+    name: "containers control",
+    summary: "Start or stop one container and verify its resulting state.",
+    usage: "<name> <start|stop>",
+    mutating: true,
+    run: (ctx) => {
+      const action = arg(ctx, 1, "start|stop");
+      if (action !== "start" && action !== "stop") {
+        throw new UsageError(`invalid action "${action}"; expected start or stop`);
+      }
+      return nasContainerControl(ctx.cfg, ctx.dsm, {
+        name: arg(ctx, 0, "name"),
+        action,
+      });
+    },
+  },
+  {
+    name: "containers remove",
+    summary: "Remove one container after it is stopped.",
+    usage: "<name>",
+    mutating: true,
+    run: (ctx) =>
+      nasContainerRemove(ctx.cfg, ctx.dsm, {
+        name: arg(ctx, 0, "name"),
+      }),
+  },
+  {
+    name: "containers projects list",
+    summary: "Container Manager Compose projects with ids, status, and container counts.",
+    run: ({ dsm }) => nasContainerProjectsList(dsm),
+  },
+  {
+    name: "containers projects info",
+    summary: "One Compose project's state and containers, resolved by name or id; omits Compose content.",
+    usage: "<name-or-id>",
+    run: (ctx) => nasContainerProjectInfo(ctx.dsm, arg(ctx, 0, "name-or-id")),
+  },
+  {
+    name: "containers projects deploy",
+    summary:
+      "Stop an existing project, replace its Compose definition from a local file, build it, and verify readiness without logging the file contents.",
+    usage: "<name-or-id> --file=PATH",
+    mutating: true,
+    run: (ctx) => {
+      const file = strFlag(ctx, "file");
+      if (!file) throw new UsageError("missing required flag --file=PATH");
+      return nasContainerProjectDeploy(ctx.cfg, ctx.dsm, {
+        project: arg(ctx, 0, "name-or-id"),
+        file,
+      });
+    },
+  },
+  {
+    name: "containers images list",
+    summary: "Container Manager image inventory with repository, tags, id, size, and update flag.",
+    run: ({ dsm }) => nasContainerImagesList(dsm),
   },
 
   // ── Packages ──────────────────────────────────────────────────────────────
@@ -313,11 +407,15 @@ export const COMMANDS: Command[] = [
       const versionFlag = strFlag(ctx, "version");
       const version = versionFlag ? parseInt(versionFlag, 10) : 1;
       const post = boolFlag(ctx, "post");
-      const call = () => ctx.dsm.call({ api, method, version, post, params });
-      // A GET raw call is a read and stays free. A confirmed POST mutates DSM
-      // (it already passed the --yes gate in cli.ts), so it goes through the same
-      // audit trail as the named writes rather than slipping past it.
-      if (!post) return call();
+      const sensitiveResponse =
+        Object.keys(params).some(isSensitiveParamKey) ||
+        (api === "SYNO.Docker.Project" && ["create", "get", "update"].includes(method));
+      const call = () =>
+        ctx.dsm.call({ api, method, version, post, params, sensitiveResponse });
+      // DSM has mutating endpoints that use GET, so method semantics join the
+      // transport in deciding whether this call needs the audit trail.
+      if (!post && !dsmMethodMayMutate(method)) return call();
+      let result: unknown;
       return withAudit(
         ctx.cfg,
         // Redact before recording: `raw` accepts arbitrary params, so a POST to
@@ -326,8 +424,11 @@ export const COMMANDS: Command[] = [
         // live DSM trace already drops them). The redacted map still shows which
         // keys were sent.
         { tool: `raw:${api}.${method}`, args: { version, params: redactSecrets(params) }, before: null },
-        async () => ({ after: await call(), ok: true })
-      ).then((r) => r.after);
+        async () => {
+          result = await call();
+          return { after: redactSensitiveValues(result), ok: true };
+        }
+      ).then(() => result);
     },
   },
 ];
@@ -375,11 +476,13 @@ export function parseArgv(input: string[]): Parsed {
  */
 export function requiresConfirmation(
   command: Command,
-  flags: Record<string, string | true>
+  flags: Record<string, string | true>,
+  args: string[] = []
 ): boolean {
   if (command.mutating) return true;
-  // `raw` is read-only by default but can POST, and DSM treats POST as mutating.
-  return command.name === "raw" && (flags.post === true || flags.post === "true");
+  if (command.name !== "raw") return false;
+  const post = flags.post === true || flags.post === "true";
+  return post || (args[1] ? dsmMethodMayMutate(args[1]) : false);
 }
 
 /**

@@ -1,6 +1,6 @@
 ---
 name: synology
-description: Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, package updates / research / installation / removal, or security posture.
+description: Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: Container Manager, packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, containers, package updates / research / installation / removal, or security posture.
 ---
 
 # Synology NAS
@@ -15,6 +15,7 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 
 - **Status + storage**: "is the NAS okay?", "drive health", "RAID state".
 - **Packages**: list installed, check for updates, get info, install, update, uninstall.
+- **Containers**: inspect containers, projects, logs, and images; deploy an existing Compose project; control or remove a container.
 - **Package research**: "what's a good package for X?", "should I install Y?". Compose with WebSearch plus `syno packages list` so you don't recommend what's already installed.
 - **Security audit**: "audit security", "is my NAS configured safely?". Fan out the read commands below and group the findings.
 
@@ -38,6 +39,11 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno shares snapshot-config <share>` | snapshot task config: schedule (enabled, time, days, next run) + retention (Smart Recycle counts, retain days). Per-snapshot lock state is in `shares snapshots`, not here |
 | `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result. Returns `{ tasks: [], note }` if Hyper Backup isn't installed, not an error |
 | `syno tasks list` | DSM Task Scheduler entries |
+| `syno containers list` | Container Manager containers: image, state, health, exit code, restart count |
+| `syno containers logs <name> [--limit=N]` | Recent container logs in chronological order. DSM's endpoint is POST-only, but this is a read and needs no confirmation |
+| `syno containers projects list` | Compose projects: id, name, status, container count |
+| `syno containers projects info <name-or-id>` | Normalized project and container state. Omits the Compose document because it may contain secrets |
+| `syno containers images list` | Local image inventory: repository, tags, id, size, update flag |
 | `syno external` | QuickConnect, DDNS, App Portal HTTPS-per-app, reverse-proxy rules, port forwarding |
 | `syno notifications` | SMTP mail config: server, ssl, verify-cert, sender, recipient count |
 | `syno certificates` | cert inventory with `days_until_expiry`, services, self-signed flag |
@@ -53,6 +59,9 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno packages update <name> --yes` | Update an installed package to latest | `{ before, after, verified }` |
 | `syno packages uninstall <name> --keep-data --yes` | Remove a package, preserving its data | `{ before, after, removed }` |
 | `syno packages control <name> <start\|stop\|restart> --yes` | Start/stop/restart a package | status poll result |
+| `syno containers control <name> <start\|stop> --yes` | Start or stop one container | `{ before, after }`; exits nonzero unless verified |
+| `syno containers remove <name> --yes` | Remove one stopped container | `{ before, after }`; exits nonzero unless verified |
+| `syno containers projects deploy <name-or-id> --file=PATH --yes` | Stop an existing project, replace its Compose definition, build, and verify ready containers | `{ before, after, compose_sha256 }`; exits nonzero unless verified |
 
 ## The `raw` escape hatch
 
@@ -66,7 +75,7 @@ Params are form-encoded and DSM JSON-parses each value, so **string params need 
 
 Use `--` to stop flag parsing when a DSM param name collides with a CLI flag: `syno raw SYNO.Foo get -- --version=3` sends a literal param rather than setting the API version.
 
-Prefer a named command when one exists. Reach for `raw` to explore a new endpoint or to answer a one-off question, and read `docs/dsm-api-quirks.md` first. Most surprising `code:` errors are documented there.
+Prefer a named command when one exists. Reach for `raw` to explore a new endpoint or to answer a one-off question, and read `docs/dsm-api-quirks.md` first. Most surprising `code:` errors are documented there. `raw` also gates non-read method names even when they use GET, because DSM does not consistently align mutation with POST.
 
 ## Write flow
 
@@ -86,10 +95,10 @@ For each write:
    ```
    Anything other than `yes` aborts. Don't infer consent from "sure", "ok", "go ahead".
 3. Run the command with exactly the args you just confirmed, plus `--yes`.
-4. Check `verified === true` (or `removed === true`) in the output. On any mismatch, surface it loudly. Silent drift is the worst outcome.
+4. Check the command exit status. Container writes return only after verification. For package writes, also check `verified === true` (or `removed === true`) in the output.
 5. Repeat from step 1 for the next package. Never bundle multiple writes in one turn.
 
-If a write returns `verified: false`, surface the entire `{ before, after, error }` payload. Don't retry automatically. The likeliest cause is a Package Center precondition (TOS acceptance on a fresh account, a package conflict) that needs human judgment.
+If a package write returns `verified: false`, surface the entire `{ before, after, error }` payload. Don't retry automatically. The likeliest cause is a Package Center precondition (TOS acceptance on a fresh account, a package conflict) that needs human judgment.
 
 Installing a package with dependencies returns a plan instead of installing. Re-run with `--accept-dependencies` once the user has seen the list.
 
@@ -101,6 +110,14 @@ First-time-only gotcha: if Package Center calls return odd errors on a freshly-c
 - `syno packages update DSM`: DSM self-updates are out of scope; apply via the DSM UI.
 - Kernel-flagged packages, same reason.
 - Firewall rule edits, 2FA enforcement changes, SMB protocol toggles aren't implemented. Surface them as findings with the DSM UI path to fix.
+
+## Container project deploy flow
+
+`syno containers projects deploy` is for an existing Container Manager project. It resolves a name to the live project id, stops its running containers, uploads the local Compose document as the project definition, calls `Project.build`, and polls the project until every long-running container is ready. A completed one-shot service is accepted only when it exited 0.
+
+The CLI treats DSM code 1202 and a dropped connection as ambiguous during project stop/build, then verifies the project state. It never calls a failed deploy successful based on the API response alone. Container Manager's build wrapper does not remove orphan containers, so inspect `containers projects info` after removing a service and confirm any orphan separately before `containers remove`.
+
+The Compose document is sensitive even when the current file has no secret: environment values may add one later. Its request trace and audit value are redacted. The audit keeps the local file path and SHA-256 instead.
 
 ## Protected packages (per-user policy)
 

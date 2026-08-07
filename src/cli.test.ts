@@ -58,6 +58,12 @@ test("exit: a write without --yes is 2 (refused, not attempted)", () => {
   assert.match(r.stderr, /--yes/);
 });
 
+test("exit: a raw GET-transport mutation without --yes is refused", () => {
+  const r = run(["raw", "SYNO.Docker.Image", "delete", "name=app"]);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /--yes/);
+});
+
 test("output: the result goes to stdout, diagnostics to stderr", () => {
   // help is the only NAS-free command that emits a payload; it must land on
   // stdout so `syno ... | jq` never has to filter stderr noise.

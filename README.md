@@ -1,6 +1,6 @@
 # synology-cli
 
-`syno`, a command-line tool for a Synology NAS (DSM 7) and, optionally, an SRM router. Packages, security audit, shares and snapshots, backups, storage health, and a raw escape hatch to any DSM Web API endpoint.
+`syno`, a command-line tool for a Synology NAS (DSM 7) and, optionally, an SRM router. Container Manager, packages, security audit, shares and snapshots, backups, storage health, and a raw escape hatch to any DSM Web API endpoint.
 
 Every command prints JSON on stdout, so you can pipe it straight to `jq`. The DSM call trace goes to stderr. Exit 0 on success, 1 on failure, 2 on a usage error.
 
@@ -52,6 +52,14 @@ Writes are marked. `syno --help` prints the same list.
 | `syno shares snapshot-config <share>` | snapshot task config: schedule and Smart Recycle retention |
 | `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result |
 | `syno tasks list` | DSM Task Scheduler entries |
+| `syno containers list` | containers with image, state, health, exit code, and restart count |
+| `syno containers logs <name>` | recent logs in chronological order; `[--limit=N]` |
+| `syno containers control <name> <start\|stop>` | **write.** verified container lifecycle control |
+| `syno containers remove <name>` | **write.** remove a stopped container |
+| `syno containers projects list` | Compose projects with ids, status, and container counts |
+| `syno containers projects info <name-or-id>` | one project's normalized state; omits its Compose content |
+| `syno containers projects deploy <name-or-id> --file=PATH` | **write.** stop, update, build, and verify an existing project |
+| `syno containers images list` | local image inventory with repository, tags, id, and size |
 | `syno packages list` | installed packages with versions and running state |
 | `syno packages updates` | packages with pending updates from the Synology repo |
 | `syno packages info <name>` | publisher, description, changelog, dependencies, size |
@@ -73,7 +81,7 @@ Writes are marked. `syno --help` prints the same list.
 
 ## Writes require `--yes`
 
-Any command marked **write** refuses to run without `--yes`. So does `syno raw --post`, since DSM treats POST as mutating.
+Any command marked **write** refuses to run without `--yes`. So does `syno raw` for POST or a method outside its read allowlist.
 
 ```sh
 syno packages update SynologyDrive --yes
@@ -85,7 +93,7 @@ Two hard refusals: updating DSM itself and updating kernel-flagged packages. App
 
 Uninstall always preserves package data. Actual data deletion is package-specific and belongs in the DSM UI.
 
-Every write is appended to a monthly JSONL audit log with the before/after state.
+Every write is appended to a monthly JSONL audit log with the before/after state. Project deploy records the Compose file's SHA-256, not its content, because Compose environment values may contain credentials.
 
 ## `raw`
 
@@ -96,6 +104,8 @@ syno raw SYNO.Core.Share get --version=1 name='"docs"'
 ```
 
 Params are form-encoded and DSM JSON-parses each value, so string params need their quotes on the wire. Bools and numbers are literal; arrays and objects are JSON-stringified. Use `--` to stop flag parsing when a DSM param name collides with a CLI flag.
+
+`raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. DSM has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary.
 
 See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, response shapes, and known API names.
 

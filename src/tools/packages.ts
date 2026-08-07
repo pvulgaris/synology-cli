@@ -42,7 +42,7 @@
 
 import type { Config } from "../config.js";
 import type { SynoClient } from "../dsm.js";
-import { DsmError } from "../dsm.js";
+import { isSoftTransportError } from "../dsm.js";
 import { withAudit } from "../audit.js";
 
 // DSM response shapes used by the install/uninstall/update flows. None are
@@ -199,19 +199,6 @@ const POSTOP_POLL_MS = 3000;
 // nas_packages_list" error on the rare pathological case.
 const INSTALL_DOWNLOAD_TIMEOUT_MS = 3 * 60 * 1000; // 3 min — .spk fetch
 const INSTALL_VERIFY_TIMEOUT_MS = 90 * 1000; // 90s — version flip after commit
-
-/** A "soft" transport error on a state-changing POST: the request didn't get a
- *  clean DSM response, but the mutation likely completed server-side, so the
- *  caller should confirm via a status/list poll rather than fail. Covers the
- *  mid-commit TCP drop DSM is known for (ECONNRESET / socket hang up / undici
- *  "terminated" / "fetch failed"). Writes aren't capped by dsm.ts's 30s timeout
- *  (that's GET-only), so a clean AbortError/TimeoutError isn't expected here; a
- *  DsmError, by contrast, means DSM answered and must propagate. */
-function isSoftTransportError(err: unknown): boolean {
-  if (err instanceof DsmError) return false;
-  const msg = String((err as { message?: string } | null)?.message ?? err);
-  return /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(msg);
-}
 
 function refuseIfProtected(name: string) {
   if (HARD_REFUSE_NAMES.has(name)) {
