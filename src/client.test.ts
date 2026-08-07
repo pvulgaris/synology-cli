@@ -1,16 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DsmError, SynoClient, isSoftTransportError } from "./dsm.js";
+import { SynologyApiError, SynoClient, isSoftTransportError } from "./client.js";
 
 function sessionClient(verbose = false): SynoClient {
   const client = new SynoClient(
     {
+      platform: "dsm",
       baseUrl: "https://example.test",
       user: "agent",
+      envPrefix: "DSM",
       session: "test",
       authVersion: 6,
       authPath: "entry.cgi",
+      sidCacheFile: "",
+      readOnly: false,
     },
     { verbose }
   );
@@ -21,7 +25,7 @@ function sessionClient(verbose = false): SynoClient {
 test("transport errors are soft only when DSM did not respond", () => {
   assert.equal(isSoftTransportError(new Error("socket hang up")), true);
   assert.equal(
-    isSoftTransportError(new DsmError("SYNO.Foo", "set", 1202, undefined, "terminated")),
+    isSoftTransportError(new SynologyApiError("SYNO.Foo", "set", 1202, undefined, "terminated")),
     false
   );
 });
@@ -49,6 +53,24 @@ test("successful DSM calls are quiet unless verbose", async () => {
   const renderedTrace = JSON.stringify(trace);
   assert.match(renderedTrace, /→ GET SYNO\.Foo\.get/);
   assert.match(renderedTrace, /✓ SYNO\.Foo\.get/);
+});
+
+test("SRM read-only policy refuses a mutation before fetch", async () => {
+  const client = new SynoClient({
+    platform: "srm",
+    baseUrl: "https://router.test",
+    user: "agent",
+    envPrefix: "SRM",
+    session: "test-srm",
+    authVersion: 3,
+    authPath: "auth.cgi",
+    sidCacheFile: "",
+    readOnly: true,
+  });
+  await assert.rejects(
+    client.call({ api: "SYNO.Core.Foo", method: "set", post: true }),
+    /Read-only SynoClient refused/
+  );
 });
 
 test("DSM traces omit Compose content from requests and debug responses", async () => {
@@ -110,7 +132,7 @@ test("sensitive DSM errors omit response content from traces and exceptions", as
         sensitiveResponse: true,
       }),
       (err: unknown) => {
-        assert.ok(err instanceof DsmError);
+        assert.ok(err instanceof SynologyApiError);
         assert.equal(err.errors, undefined);
         assert.doesNotMatch(err.message, /do-not-log/);
         return true;

@@ -40,10 +40,11 @@
  *   SYNO.Core.Package.Uninstallation        v1  uninstall
  */
 
-import type { Config } from "../config.js";
-import type { SynoClient } from "../dsm.js";
-import { isSoftTransportError } from "../dsm.js";
+import type { RuntimeConfig } from "../config.js";
+import type { SynoClient } from "../client.js";
+import { isSoftTransportError } from "../client.js";
 import { withAudit } from "../audit.js";
+import { poll } from "./poll.js";
 
 // DSM response shapes used by the install/uninstall/update flows. None are
 // documented — observed from HAR captures and reverse-engineered. Fields are
@@ -191,7 +192,7 @@ const POSTOP_VERIFY_TIMEOUT_MS = 5 * 60 * 1000;
 const POSTOP_POLL_MS = 3000;
 
 // Install-flow waits are deliberately tighter than the upgrade flow's 15-min
-// budget. The MCP call rides a single streamable-HTTP response with no SSE
+// budget. The CLI process remains attached to the request with no separate job
 // heartbeats, so the client's undici bodyTimeout (~300s) drops the connection
 // if nothing returns. Synology-repo packages download + commit in seconds, so
 // these bounds fit comfortably inside the transport window and turn the old
@@ -203,7 +204,7 @@ const INSTALL_VERIFY_TIMEOUT_MS = 90 * 1000; // 90s — version flip after commi
 function refuseIfProtected(name: string) {
   if (HARD_REFUSE_NAMES.has(name)) {
     throw new Error(
-      `Refusing to operate on package "${name}" — DSM/kernel updates can brick the host and are out of scope for this MCP. Apply via DSM UI → Control Panel → Update & Restore.`
+      `Refusing to operate on package "${name}". DSM/kernel updates can brick the host and are out of scope for this CLI. Apply via DSM UI > Control Panel > Update & Restore.`
     );
   }
 }
@@ -286,11 +287,7 @@ export async function nasPackagesCheckUpdates(dsm: SynoClient) {
   return { pending };
 }
 
-// DSM has no `SYNO.Core.Package.Server.get` method (returns code 103, "method
-// not found"), so we list the full catalog and filter. Same pattern as
-// `findInCatalog`; kept separate because the read tool surfaces different
-// fields (publisher/changelog/deps) and shouldn't share that helper's throw
-// shape.
+// DSM has no `SYNO.Core.Package.Server.get` method, so this reads the catalog.
 export async function nasPackageInfo(
   dsm: SynoClient,
   args: { name: string }
@@ -356,19 +353,22 @@ interface CatalogEntry {
   installOnColdStorage: boolean;
 }
 
-/** Read the catalog entry for a package id (or display name). Returns the
- *  download metadata the multi-step install/upgrade flow needs. */
-async function findInCatalog(
-  dsm: SynoClient,
-  packageId: string
-): Promise<CatalogEntry> {
+async function loadCatalog(dsm: SynoClient): Promise<CatalogPackage[]> {
   const data = await dsm.call<CatalogListResp>({
     api: "SYNO.Core.Package.Server",
     method: "list",
     version: 2,
     params: { tab: "all" },
   });
-  const pkg = (data?.packages ?? []).find(
+  return data?.packages ?? [];
+}
+
+/** Find and validate the download metadata needed by install and upgrade. */
+function findCatalogEntry(
+  packages: CatalogPackage[],
+  packageId: string
+): CatalogEntry {
+  const pkg = packages.find(
     (p) => p.id === packageId || p.dname === packageId
   );
   if (!pkg) {
@@ -408,13 +408,12 @@ async function waitForState(
   packageId: string,
   predicate: (state: PackageState) => boolean
 ): Promise<PackageState> {
-  const deadline = Date.now() + POSTOP_VERIFY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const state = await listOneState(dsm, packageId);
-    if (predicate(state)) return state;
-    await sleep(POSTOP_POLL_MS);
-  }
-  return await listOneState(dsm, packageId);
+  return poll({
+    read: () => listOneState(dsm, packageId),
+    done: predicate,
+    intervalMs: POSTOP_POLL_MS,
+    timeoutMs: POSTOP_VERIFY_TIMEOUT_MS,
+  });
 }
 
 // ──────────── Write tools ────────────
@@ -762,7 +761,7 @@ async function waitForVersionFlip(
   throw new Error(
     `Install of ${packageId} issued but not confirmed within ${timeoutMs / 1000}s ` +
       `(package not yet at ${targetVersion} in Package.list). DSM may still be ` +
-      `committing — re-check with nas_packages_list before retrying.`
+      `committing. Re-check with "syno packages list" before retrying.`
   );
 }
 
@@ -788,18 +787,19 @@ async function cleanupUpgradeTmp(
 }
 
 export async function nasPackageUpdate(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { name: string }
 ) {
   refuseIfProtected(args.name);
-  const [before, catalog] = await Promise.all([
+  const [before, packages] = await Promise.all([
     listOneState(dsm, args.name),
-    findInCatalog(dsm, args.name),
+    loadCatalog(dsm),
   ]);
+  const catalog = findCatalogEntry(packages, args.name);
   if (!before) {
     throw new Error(
-      `Package "${args.name}" is not installed. Use nas_package_install for fresh installs.`
+      `Package "${args.name}" is not installed. Use "syno packages install" for fresh installs.`
     );
   }
   if (catalog.version === before.version) {
@@ -838,18 +838,19 @@ export async function nasPackageUpdate(
 }
 
 export async function nasPackageInstall(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
-  args: { name: string; version?: string; accept_dependencies?: boolean }
+  args: { name: string; accept_dependencies?: boolean }
 ) {
   refuseIfProtected(args.name);
-  const [before, catalog] = await Promise.all([
+  const [before, packages] = await Promise.all([
     listOneState(dsm, args.name),
-    findInCatalog(dsm, args.name),
+    loadCatalog(dsm),
   ]);
+  const catalog = findCatalogEntry(packages, args.name);
   if (before) {
     throw new Error(
-      `Package "${args.name}" is already installed (version ${before.version}). Use nas_package_update to upgrade.`
+      `Package "${args.name}" is already installed (version ${before.version}). Use "syno packages update" to upgrade.`
     );
   }
 
@@ -869,7 +870,7 @@ export async function nasPackageInstall(
     const deps = await Promise.all(
       depItems.map(async (q) => {
         try {
-          const c = await findInCatalog(dsm, q.pkg);
+          const c = findCatalogEntry(packages, q.pkg);
           return { id: c.id, version: c.version };
         } catch {
           return { id: q.pkg, version: null as string | null };
@@ -886,7 +887,7 @@ export async function nasPackageInstall(
       message:
         `Installing ${catalog.id} (${catalog.version}) requires DSM to also install: ${human}. ` +
         `This is Package Center's "the following operations will also be performed" prompt. ` +
-        `Re-run nas_package_install with accept_dependencies:true to install all of them.`,
+        `Re-run "syno packages install ${args.name} --accept-dependencies --yes" to install all of them.`,
     };
   }
 
@@ -911,7 +912,7 @@ export async function nasPackageInstall(
       let targetAfter: PackageState = null;
       for (const pkgId of order) {
         const cat =
-          pkgId === catalog.id ? catalog : await findInCatalog(dsm, pkgId);
+          pkgId === catalog.id ? catalog : findCatalogEntry(packages, pkgId);
         const state = await installOnePackage(dsm, cat);
         completed.push(pkgId);
         if (pkgId === catalog.id) targetAfter = state;
@@ -941,7 +942,7 @@ async function controlPackage(
   packageId: string,
   method: "start" | "stop",
   desired: (status: string | undefined) => boolean
-): Promise<void> {
+): Promise<PackageState> {
   try {
     await dsm.call({
       api: "SYNO.Core.Package.Control",
@@ -956,28 +957,28 @@ async function controlPackage(
       `[packages] ${method} ${packageId}: connection dropped — verifying via poll`
     );
   }
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const s = await listOneState(dsm, packageId);
-    if (!s) return; // package gone (e.g. uninstalled mid-call)
-    if (desired(s.status)) return;
-    await sleep(1000);
-  }
+  const state = await poll({
+    read: () => listOneState(dsm, packageId),
+    done: (value) => !value || desired(value.status),
+    intervalMs: 1_000,
+    timeoutMs: 30_000,
+  });
+  if (!state || desired(state.status)) return state;
   throw new Error(
     `${method} ${packageId} timed out after 30s waiting for status to flip`
   );
 }
 
-async function stopPackage(dsm: SynoClient, packageId: string): Promise<void> {
+async function stopPackage(dsm: SynoClient, packageId: string): Promise<PackageState> {
   return controlPackage(dsm, packageId, "stop", (s) => s !== "running");
 }
 
-async function startPackage(dsm: SynoClient, packageId: string): Promise<void> {
+async function startPackage(dsm: SynoClient, packageId: string): Promise<PackageState> {
   return controlPackage(dsm, packageId, "start", (s) => s === "running");
 }
 
 export async function nasPackageControl(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { name: string; action: "start" | "stop" | "restart" }
 ) {
@@ -1001,8 +1002,7 @@ export async function nasPackageControl(
           after = before;
           ok = true;
         } else {
-          await stopPackage(dsm, args.name);
-          after = await listOneState(dsm, args.name);
+          after = await stopPackage(dsm, args.name);
           ok = after?.status !== "running";
         }
       } else if (args.action === "start") {
@@ -1010,8 +1010,7 @@ export async function nasPackageControl(
           after = before;
           ok = true;
         } else {
-          await startPackage(dsm, args.name);
-          after = await listOneState(dsm, args.name);
+          after = await startPackage(dsm, args.name);
           ok = after?.status === "running";
         }
       } else {
@@ -1019,8 +1018,7 @@ export async function nasPackageControl(
         // `Package.Control.restart` method isn't reliably exposed across DSM
         // versions, so we drive it from primitives.
         if (before.status === "running") await stopPackage(dsm, args.name);
-        await startPackage(dsm, args.name);
-        after = await listOneState(dsm, args.name);
+        after = await startPackage(dsm, args.name);
         ok = after?.status === "running";
       }
       return {
@@ -1037,7 +1035,7 @@ export async function nasPackageControl(
 }
 
 export async function nasPackageUninstall(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { name: string; keep_data?: boolean }
 ) {
@@ -1054,13 +1052,13 @@ export async function nasPackageUninstall(
   // Synology Drive, different per package) defined in the package's own
   // client-side wizard — not exposed by any queryable API. So the human chooses:
   // proceed with the default data-preserving uninstall, or go to the DSM UI to
-  // delete the data. The MCP only ever does the data-preserving uninstall (the
+  // delete the data. The CLI only ever does the data-preserving uninstall (the
   // delete key is unsafe to drive blind), so deletion is always routed to the UI.
   const hadDataDialog = before.additional?.has_uninstall_dialog === true;
   if (hadDataDialog) {
     if (args.keep_data === false) {
       throw new Error(
-        `Deleting "${args.name}"'s data on uninstall isn't supported via the MCP — ` +
+        `Deleting "${args.name}"'s data on uninstall isn't supported via the CLI. ` +
           `the delete option is package-specific. To remove its data, uninstall via ` +
           `Package Center (DSM UI) and check "Delete the items listed above". ` +
           `Re-run with keep_data:true to uninstall while PRESERVING the data.`
@@ -1072,10 +1070,10 @@ export async function nasPackageUninstall(
         package: { id: before.id, version: before.version },
         message:
           `"${args.name}" stores associated data and settings. Uninstalling via the ` +
-          `MCP removes the package but PRESERVES that data on disk. To also DELETE ` +
+          `The CLI removes the package but PRESERVES that data on disk. To also DELETE ` +
           `the data, uninstall via Package Center (DSM UI) — that option is ` +
           `package-specific and not exposed safely through the API. Re-run ` +
-          `nas_package_uninstall with keep_data:true to proceed (data kept).`,
+          `"syno packages uninstall ${args.name} --keep-data --yes" to proceed.`,
       };
     }
     // keep_data === true → proceed with the default, data-preserving uninstall.
@@ -1113,7 +1111,7 @@ export async function nasPackageUninstall(
     }
   );
 
-  // The MCP never deletes data, so an uninstall is *always* data-preserving;
+  // The CLI never deletes data, so an uninstall is *always* data-preserving;
   // `had_data_dialog` reports whether this package had the deletable-data option
   // (i.e. whether data was left behind that the UI could have removed).
   return { before, after, removed: ok, stopped, had_data_dialog: hadDataDialog };

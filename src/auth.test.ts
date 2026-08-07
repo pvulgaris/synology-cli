@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadCredentials, loadDsmOnlyCredentials } from "./auth.js";
+import { loadSynologyCredentials } from "./auth.js";
 
 // Temp dirs created by tmpSecret, cleaned after each test (one top-level hook so
 // the last test's dir is cleaned too — registering afterEach from inside a test
@@ -63,7 +63,7 @@ test("*_FILE sources the secret from the file, trimming the trailing newline", a
   await withEnv(
     { ...CLEAR, DSM_PASSWORD_FILE: pwFile, DSM_TOTP_SECRET_FILE: totpFile },
     async () => {
-      const c = await loadDsmOnlyCredentials("DSM");
+      const c = await loadSynologyCredentials("DSM");
       assert.equal(c.password, "s3cret-pw");
       assert.equal(c.totpSecret, "JBSWY3DPEHPK3PXP");
     }
@@ -74,7 +74,7 @@ test("direct env is used when no *_FILE is set", async () => {
   await withEnv(
     { ...CLEAR, DSM_PASSWORD: "envpw", DSM_TOTP_SECRET: "ENVTOTP" },
     async () => {
-      const c = await loadDsmOnlyCredentials("DSM");
+      const c = await loadSynologyCredentials("DSM");
       assert.equal(c.password, "envpw");
       assert.equal(c.totpSecret, "ENVTOTP");
     }
@@ -92,7 +92,7 @@ test("setting both NAME and NAME_FILE is refused (fail closed on ambiguity)", as
     },
     async () => {
       await assert.rejects(
-        () => loadDsmOnlyCredentials("DSM"),
+        () => loadSynologyCredentials("DSM"),
         /Both DSM_PASSWORD and DSM_PASSWORD_FILE are set/
       );
     }
@@ -110,7 +110,7 @@ test("*_FILE unreadable fails closed naming the var + errno, WITHOUT leaking the
     },
     async () => {
       await assert.rejects(
-        () => loadDsmOnlyCredentials("DSM"),
+        () => loadSynologyCredentials("DSM"),
         (e: unknown) =>
           e instanceof Error &&
           /DSM_PASSWORD_FILE could not be read \(ENOENT\)/.test(e.message) &&
@@ -125,7 +125,7 @@ test("the envPrefix keys the *_FILE lookup (SRM_* for the router)", async () => 
   await withEnv(
     { SRM_PASSWORD: undefined, SRM_PASSWORD_FILE: pwFile, SRM_TOTP_SECRET: "SRMTOTP", SRM_TOTP_SECRET_FILE: undefined },
     async () => {
-      const c = await loadDsmOnlyCredentials("SRM");
+      const c = await loadSynologyCredentials("SRM");
       assert.equal(c.password, "router-pw");
       assert.equal(c.totpSecret, "SRMTOTP");
     }
@@ -135,12 +135,12 @@ test("the envPrefix keys the *_FILE lookup (SRM_* for the router)", async () => 
 
 test("an empty (truncated) secret file fails closed", async () => {
   // A `> file` interrupted mid-write leaves "". secretFromEnv trims to "" (falsy),
-  // so this must reject via assertDsmCreds, never silently boot with a blank secret.
+  // so this must reject during credential validation, never accept a blank secret.
   const emptyPw = tmpSecret("   \n"); // whitespace-only → "" after trim
   await withEnv(
     { ...CLEAR, DSM_PASSWORD_FILE: emptyPw, DSM_TOTP_SECRET: "ENVTOTP" },
     async () => {
-      await assert.rejects(() => loadDsmOnlyCredentials("DSM"), /DSM password is empty/);
+      await assert.rejects(() => loadSynologyCredentials("DSM"), /DSM password is empty/);
     }
   );
 });
@@ -152,7 +152,7 @@ test('an empty-string env var (compose ${VAR:-}) is treated as absent, so *_FILE
   await withEnv(
     { ...CLEAR, DSM_PASSWORD: "", DSM_PASSWORD_FILE: pwFile, DSM_TOTP_SECRET: "ENVTOTP" },
     async () => {
-      const c = await loadDsmOnlyCredentials("DSM");
+      const c = await loadSynologyCredentials("DSM");
       assert.equal(c.password, "filepw");
     }
   );
@@ -166,17 +166,17 @@ test("a HALF-set pair throws 'set together' (not a silent fall-through to anothe
     { ...CLEAR, DSM_PASSWORD_FILE: pwFile /* totp absent */ },
     async () => {
       await assert.rejects(
-        () => loadDsmOnlyCredentials("DSM"),
+        () => loadSynologyCredentials("DSM"),
         /DSM_PASSWORD and DSM_TOTP_SECRET must be set together/
       );
     }
   );
 });
 
-test("BOTH secrets absent fails closed via assertDsmCreds (distinct from half-set)", async () => {
+test("BOTH secrets absent fail closed during credential validation", async () => {
   await withEnv({ ...CLEAR /* nothing set */ }, async () => {
     await assert.rejects(
-      () => loadDsmOnlyCredentials("DSM"),
+      () => loadSynologyCredentials("DSM"),
       /DSM password is empty — set DSM_PASSWORD or DSM_PASSWORD_FILE/
     );
   });
@@ -191,7 +191,7 @@ test("*_FILE that is a symlink is refused (not followed)", async () => {
   await withEnv(
     { ...CLEAR, DSM_PASSWORD_FILE: link, DSM_TOTP_SECRET: "ENVTOTP" },
     async () => {
-      await assert.rejects(() => loadDsmOnlyCredentials("DSM"), /DSM_PASSWORD_FILE is a symlink/);
+      await assert.rejects(() => loadSynologyCredentials("DSM"), /DSM_PASSWORD_FILE is a symlink/);
     }
   );
 });

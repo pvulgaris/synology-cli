@@ -13,7 +13,7 @@
  * Read-only: only list + get are called.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
 
 const pad = (n: unknown) => String(n).padStart(2, "0");
 

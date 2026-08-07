@@ -8,18 +8,21 @@
  *   - stderr carries concise progress and errors; --verbose adds the API trace.
  *   - exit 0 on success, 1 on failure, 2 on a usage error.
  *
- * Required env: DSM_BASE_URL, plus credentials (see auth.ts — env, *_FILE, or a
- * secret-manager launcher). SRM_BASE_URL optionally adds the router.
+ * Each command loads only its selected DSM or SRM target and credentials.
  */
 
-import { loadConfig } from "./config.js";
-import { SynoClient, makeRouterClient } from "./dsm.js";
+import { loadRuntimeConfig, loadTarget, tryLoadTarget } from "./config.js";
+import { SynoClient } from "./client.js";
 import {
   COMMANDS,
   UsageError,
+  commandManifest,
+  commandUsage,
   parseArgv,
   requiresConfirmation,
   resolveCommand,
+  selectPlatform,
+  validateInvocation,
 } from "./commands.js";
 import { VERSION } from "./version.js";
 
@@ -33,17 +36,17 @@ interface Outcome {
 
 function helpText(): string {
   const lines = [
-    `syno ${VERSION} — Synology NAS from the command line`,
+    `syno ${VERSION}: Synology devices from the command line`,
     "",
     "Usage: syno <command> [args] [--flags]",
     "",
     "Commands:",
   ];
   const width = Math.max(
-    ...COMMANDS.map((c) => `${c.name} ${c.usage ?? ""}`.trim().length)
+    ...COMMANDS.map((c) => `${c.name} ${commandUsage(c)}`.trim().length)
   );
   for (const c of COMMANDS) {
-    const invocation = `${c.name} ${c.usage ?? ""}`.trim();
+    const invocation = `${c.name} ${commandUsage(c)}`.trim();
     const mark = c.mutating ? " [write]" : "";
     lines.push(`  ${invocation.padEnd(width)}  ${c.summary}${mark}`);
   }
@@ -52,9 +55,9 @@ function helpText(): string {
     "Write commands require --yes. `raw` also requires it for POST or any non-read method.",
     "",
     "Every command prints JSON on stdout; progress and errors go to stderr.",
-    "Use --verbose to add the DSM API trace to stderr.",
-    "Use `raw` for any endpoint without a named command — see docs/dsm-api-quirks.md",
-    "for the form-encoding rules (string params need JSON quotes)."
+    "Use --verbose to add the Synology API trace to stderr.",
+    "Use --target=dsm|srm when a command supports both platforms.",
+    "Use `raw` for any endpoint without a named command."
   );
   return lines.join("\n");
 }
@@ -62,7 +65,13 @@ function helpText(): string {
 async function main(): Promise<Outcome> {
   const raw = process.argv.slice(2);
   if (raw.length === 0 || raw[0] === "help" || raw[0] === "--help" || raw[0] === "-h") {
-    return { code: 0, stdout: helpText() };
+    const json = raw.includes("--json");
+    return {
+      code: 0,
+      stdout: json
+        ? JSON.stringify({ version: VERSION, commands: commandManifest() }, null, 2)
+        : helpText(),
+    };
   }
   if (raw[0] === "--version" || raw[0] === "-v") {
     return { code: 0, stdout: VERSION };
@@ -74,30 +83,49 @@ async function main(): Promise<Outcome> {
     return { code: 2, stderr: `Unknown command: ${argv.join(" ")}\n\n${helpText()}` };
   }
   const { command, args } = resolved;
+  validateInvocation(command, args, flags);
 
   if (requiresConfirmation(command, flags, args) && !(flags.yes === true || flags.yes === "true")) {
     return {
       code: 2,
       stderr:
         `Refusing to run "${command.name}" without --yes.\n` +
-        `This command may change state on the NAS. Re-run with --yes to confirm.`,
+        `This command may change device state. Re-run with --yes to confirm.`,
     };
   }
 
-  const cfg = loadConfig();
-  // Process-wide TLS skip for DSM's self-signed cert. A per-fetch undici
+  const runtime = loadRuntimeConfig();
+  // Process-wide TLS skip for Synology's self-signed certificates. A per-fetch undici
   // dispatcher was tried and reverted: it interacted badly with Node's built-in
   // fetch (intermittent "fetch failed" and silently-empty responses). The blast
-  // radius is bounded to DSM-shaped targets. Any non-Synology outbound added
+  // radius is bounded to Synology targets. Any non-Synology outbound added
   // later must route through its own verifying Agent to override this.
-  if (cfg.tlsSkipVerify) {
+  if (runtime.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const verbose = flags.verbose === true || flags.verbose === "true";
-  const dsm = new SynoClient(cfg, { verbose });
-  const router = makeRouterClient(cfg, { verbose });
-
-  const result = await command.run({ cfg, dsm, router, args, flags });
+  let result: unknown;
+  if (command.scope === "aggregate") {
+    const clients: Partial<Record<"dsm" | "srm", SynoClient>> = {};
+    for (const platform of command.platforms) {
+      const target = tryLoadTarget(platform);
+      if (target) clients[platform] = new SynoClient(target, { verbose });
+    }
+    result = await command.run({ runtime, clients, args, flags });
+  } else {
+    const platform = selectPlatform(command, flags);
+    let target;
+    try {
+      target = loadTarget(platform);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Missing required env:")) {
+        throw new UsageError(err.message);
+      }
+      throw err;
+    }
+    const client = new SynoClient(target, { verbose });
+    result = await command.run({ runtime, target, client, args, flags });
+  }
   return { code: 0, stdout: JSON.stringify(result, null, 2) };
 }
 
@@ -126,7 +154,7 @@ main()
   .then(finish)
   .catch((err) => {
     // A malformed invocation is exit 2 (the documented usage code); anything else
-    // is a runtime or DSM failure at exit 1. Both flush stderr before exiting.
+    // is a runtime or API failure at exit 1. Both flush stderr before exiting.
     const code = err instanceof UsageError ? 2 : 1;
     finish({ code, stderr: `[syno] ${err?.message ?? err}` });
   });

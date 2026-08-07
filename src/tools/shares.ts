@@ -8,7 +8,7 @@
  * `share_quota_used`, both in MB.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
 
 export async function nasSharesList(dsm: SynoClient) {
   const data = await dsm.call({

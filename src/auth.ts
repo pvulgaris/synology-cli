@@ -1,6 +1,6 @@
 /**
  * Credential provider: resolves the DSM/SRM login secrets (password, TOTP seed)
- * and the wire bearer token from the environment, then generates TOTP codes.
+ * from the environment, then generates TOTP codes.
  *
  * Each secret resolves from the first source that provides it:
  *   1. `<NAME>_FILE` — read the secret from that file path (the Docker *_FILE
@@ -12,7 +12,7 @@
  *
  * How the env/files get populated is up to the operator: write a file, export the
  * env directly, or fill it through a secret-manager launcher.
- * The server has no built-in secret-manager dependency.
+ * The CLI has no built-in secret-manager dependency.
  */
 
 import { readFileSync, lstatSync } from "node:fs";
@@ -67,7 +67,7 @@ export function secretFromEnv(name: string): string | undefined {
 }
 
 /** The login secrets a SynoClient actually needs (NAS or router). */
-export interface DsmOnlyCredentials {
+export interface SynologyCredentials {
   password: string;
   totpSecret: string;
 }
@@ -78,7 +78,7 @@ export interface DsmOnlyCredentials {
  *  mix identities with a different source (e.g. DSM_DEPLOY_USER + the runtime
  *  DSM_PASSWORD). Any secretFromEnv misconfig (both `<NAME>` and `<NAME>_FILE` set,
  *  unreadable/symlinked file) propagates verbatim — a fall-through can never mask it. */
-export function credsFromPrefix(prefix: string): DsmOnlyCredentials | undefined {
+function credsFromPrefix(prefix: string): SynologyCredentials | undefined {
   const password = secretFromEnv(`${prefix}_PASSWORD`);
   const totpSecret = secretFromEnv(`${prefix}_TOTP_SECRET`);
   if (password === undefined && totpSecret === undefined) return undefined;
@@ -93,7 +93,7 @@ export function credsFromPrefix(prefix: string): DsmOnlyCredentials | undefined 
 
 /** Fail closed on missing login secrets — a blank/unset secret should refuse to
  *  start, not boot degraded. Applies to both NAS and router creds. */
-function assertDsmCreds(c: DsmOnlyCredentials, label: string): void {
+function assertCredentials(c: SynologyCredentials, label: string): void {
   if (!c.password) {
     throw new Error(`${label} password is empty — set ${label}_PASSWORD or ${label}_PASSWORD_FILE.`);
   }
@@ -102,22 +102,12 @@ function assertDsmCreds(c: DsmOnlyCredentials, label: string): void {
   }
 }
 
-/** The default credential loader, i.e. the NAS. A thin alias rather than its own
- *  resolution path, so NAS and router creds can't drift. It exists because
- *  SynoClient's credLoader contract takes no arguments.
- *
- *  This used to also demand a wire bearer token for the HTTP daemon. Nothing
- *  serves HTTP now, so requiring one only made `syno` refuse to start. */
-export async function loadCredentials(): Promise<DsmOnlyCredentials> {
-  return loadDsmOnlyCredentials("DSM");
-}
-
 /** Load the login secrets (password + totp) for a target. Resolves the
  *  `<envPrefix>_*` pair (env or *_FILE, e.g. SRM_*) and fails closed on a
  *  blank/absent secret. */
-export async function loadDsmOnlyCredentials(envPrefix = "DSM"): Promise<DsmOnlyCredentials> {
+export async function loadSynologyCredentials(envPrefix: string): Promise<SynologyCredentials> {
   const creds = credsFromPrefix(envPrefix) ?? { password: "", totpSecret: "" };
-  assertDsmCreds(creds, envPrefix);
+  assertCredentials(creds, envPrefix);
   return creds;
 }
 

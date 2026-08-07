@@ -7,7 +7,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { userActive } from "./security.js";
+import { nasDsmSecuritySettings, userActive } from "./security.js";
+import type { SynoClient, SynologyCallOptions } from "../client.js";
 
 test("userActive: 'normal' is active", () => {
   assert.deepEqual(userActive("normal"), { active: true, indeterminate: false });
@@ -37,4 +38,16 @@ test("userActive: leniently-parseable non-dates don't sneak through as disabled"
 test("userActive: a non-string value is indeterminate, not a crash", () => {
   assert.deepEqual(userActive(undefined), { active: true, indeterminate: true });
   assert.deepEqual(userActive(0), { active: true, indeterminate: true });
+});
+
+test("security settings distinguish a failed source from an absent setting", async () => {
+  const client = {
+    call: async (options: SynologyCallOptions) => {
+      if (options.api === "SYNO.Core.FileServ.SMB") throw new Error("SMB unavailable");
+      return {};
+    },
+  } as SynoClient;
+  const result = await nasDsmSecuritySettings(client);
+  assert.equal(result.smb.enabled, null);
+  assert.deepEqual(result.warnings, [{ source: "smb", error: "SMB unavailable" }]);
 });

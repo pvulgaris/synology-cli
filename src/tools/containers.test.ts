@@ -14,7 +14,7 @@ import {
   nasContainerRemove,
   nasContainersList,
 } from "./containers.js";
-import { DsmError } from "../dsm.js";
+import { SynologyApiError } from "../client.js";
 
 function config(auditLogDir: string): any {
   return { auditLogDir };
@@ -188,7 +188,7 @@ test("project deploy stops, updates, builds, verifies, and never audits Compose 
       }
       if (opts.method === "stop") {
         phase = "stopped";
-        throw new DsmError(opts.api, opts.method, 1202, undefined, "ambiguous stop");
+        throw new SynologyApiError(opts.api, opts.method, 1202, undefined, "ambiguous stop");
       }
       if (opts.method === "update") {
         assert.equal(opts.params.content, JSON.stringify(compose));
@@ -196,7 +196,7 @@ test("project deploy stops, updates, builds, verifies, and never audits Compose 
       }
       if (opts.method === "build") {
         phase = "new";
-        throw new DsmError(opts.api, opts.method, 1202, undefined, "ambiguous build");
+        throw new SynologyApiError(opts.api, opts.method, 1202, undefined, "ambiguous build");
       }
       throw new Error(`unexpected method ${opts.method}`);
     },
@@ -217,6 +217,11 @@ test("project deploy stops, updates, builds, verifies, and never audits Compose 
   assert.deepEqual(
     calls.filter((call) => ["stop", "update", "build"].includes(call.method)).map((call) => call.method),
     ["stop", "update", "build"]
+  );
+  assert.equal(
+    calls.filter((call) => call.method === "list").length,
+    1,
+    "deployment resolves the project once instead of listing on every poll"
   );
 });
 
@@ -341,7 +346,7 @@ test("container writes do not treat DSM errors as ambiguous", async () => {
           total: 1,
         };
       }
-      throw new DsmError(opts.api, opts.method, 1202, undefined, "DSM refused the write");
+      throw new SynologyApiError(opts.api, opts.method, 1202, undefined, "DSM refused the write");
     },
   } as any;
 

@@ -5,11 +5,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { SynoClient, DsmCallOptions } from "../dsm.js";
+import type { SynoClient, SynologyCallOptions } from "../client.js";
 import { nasTaskschedulerList } from "./scheduler.js";
 
-function fakeClient(handlers: Record<string, (opts: DsmCallOptions) => unknown>): SynoClient {
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+function fakeClient(handlers: Record<string, (opts: SynologyCallOptions) => unknown>): SynoClient {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     const key = `${opts.api}.${opts.method}`;
     const h = handlers[key];
     if (!h) throw new Error(`unexpected DSM call: ${key}`);

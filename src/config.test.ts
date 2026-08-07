@@ -1,63 +1,87 @@
-/**
- * Config parsing — the router-target edge a NAS deploy can silently hit.
- * Container Manager injects `SRM_USER: ${SRM_USER:-}` — an *empty string*,
- * not unset — when the host var is absent. optional()'s `??` would keep "" and
- * log into SRM with account="", so parseRouter must fall back to the dedicated
- * `claude-mcp` admin instead.
- *
- * Pure: drives loadConfig with a controlled env, restored after each case.
- */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadConfig } from "./config.js";
+import {
+  loadRuntimeConfig,
+  loadTarget,
+  tryLoadTarget,
+} from "./config.js";
 
-/** Run `fn` with `env` applied over process.env, restoring the prior values. */
 function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
   const saved: Record<string, string | undefined> = {};
-  for (const k of Object.keys(env)) saved[k] = process.env[k];
+  for (const key of Object.keys(env)) saved[key] = process.env[key];
   try {
-    for (const [k, v] of Object.entries(env)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
     fn();
   } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 }
 
-const BASE = { DSM_BASE_URL: "https://nas.test:5001" };
-const ROUTER = { ...BASE, SRM_BASE_URL: "https://router.test:8001" };
-
-test("router: empty SRM_USER (compose ${SRM_USER:-}) falls back to claude-mcp", () => {
-  withEnv({ ...ROUTER, SRM_USER: "" }, () => {
-    assert.equal(loadConfig().router?.user, "claude-mcp");
+test("DSM target uses DSM authentication defaults", () => {
+  withEnv({ DSM_BASE_URL: "https://nas.test:5001/", DSM_USER: "agent" }, () => {
+    const target = loadTarget("dsm");
+    assert.equal(target.platform, "dsm");
+    assert.equal(target.baseUrl, "https://nas.test:5001");
+    assert.equal(target.user, "agent");
+    assert.equal(target.envPrefix, "DSM");
+    assert.equal(target.authPath, "entry.cgi");
+    assert.equal(target.authVersion, 6);
+    assert.equal(target.readOnly, false);
   });
 });
 
-test("router: whitespace-only SRM_USER falls back to claude-mcp", () => {
-  withEnv({ ...ROUTER, SRM_USER: "   " }, () => {
-    assert.equal(loadConfig().router?.user, "claude-mcp");
+test("SRM target loads without any DSM configuration", () => {
+  withEnv(
+    {
+      DSM_BASE_URL: undefined,
+      DSM_USER: undefined,
+      SRM_BASE_URL: "https://router.test:8001",
+      SRM_USER: "srm-agent",
+    },
+    () => {
+      const target = loadTarget("srm");
+      assert.equal(target.platform, "srm");
+      assert.equal(target.user, "srm-agent");
+      assert.equal(target.envPrefix, "SRM");
+      assert.equal(target.authPath, "auth.cgi");
+      assert.equal(target.authVersion, 3);
+      assert.equal(target.readOnly, true);
+    }
+  );
+});
+
+test("blank SRM user uses the dedicated account default", () => {
+  withEnv(
+    { SRM_BASE_URL: "https://router.test:8001", SRM_USER: "   " },
+    () => assert.equal(loadTarget("srm").user, "claude-mcp")
+  );
+});
+
+test("tryLoadTarget returns null only when that target is absent", () => {
+  withEnv({ DSM_BASE_URL: "https://nas.test", SRM_BASE_URL: undefined }, () => {
+    assert.equal(tryLoadTarget("srm"), null);
+    assert.equal(tryLoadTarget("dsm")?.platform, "dsm");
   });
 });
 
-test("router: unset SRM_USER falls back to claude-mcp", () => {
-  withEnv({ ...ROUTER, SRM_USER: undefined }, () => {
-    assert.equal(loadConfig().router?.user, "claude-mcp");
-  });
-});
-
-test("router: an explicit SRM_USER is honoured", () => {
-  withEnv({ ...ROUTER, SRM_USER: "srm-admin" }, () => {
-    assert.equal(loadConfig().router?.user, "srm-admin");
-  });
-});
-
-test("no SRM_BASE_URL ⇒ router disabled (NAS-only back-compat)", () => {
-  withEnv({ ...BASE, SRM_BASE_URL: undefined, SRM_USER: "" }, () => {
-    assert.equal(loadConfig().router, null);
-  });
+test("runtime configuration does not require a device", () => {
+  withEnv(
+    {
+      DSM_BASE_URL: undefined,
+      SRM_BASE_URL: undefined,
+      AUDIT_LOG_DIR: "/tmp/syno-audit-test",
+      TLS_REJECT_UNAUTHORIZED: "1",
+    },
+    () => {
+      const runtime = loadRuntimeConfig();
+      assert.equal(runtime.auditLogDir, "/tmp/syno-audit-test");
+      assert.equal(runtime.tlsSkipVerify, false);
+    }
+  );
 });
