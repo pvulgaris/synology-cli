@@ -2,7 +2,8 @@
  * System-level read tools: status, storage health.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
+import { readSource, readWarnings } from "./partial.js";
 
 // DSM returns up_time as a duration string ("HH:MM:SS" under 100h, or
 // "N days HH:MM:SS" beyond). Parse to seconds so consumers can do math
@@ -16,14 +17,17 @@ function parseUpTime(s: unknown): number | null {
 }
 
 export async function nasStatus(dsm: SynoClient) {
-  const [info, util] = await Promise.all([
+  const [info, utilization] = await Promise.all([
     dsm.call({ api: "SYNO.Core.System", method: "info", version: 3 }),
-    dsm.call({
-      api: "SYNO.Core.System.Utilization",
-      method: "get",
-      version: 1,
-    }).catch(() => null),
+    readSource("utilization", () =>
+      dsm.call({
+        api: "SYNO.Core.System.Utilization",
+        method: "get",
+        version: 1,
+      })
+    ),
   ]);
+  const util = utilization.value;
   return {
     model: info?.model,
     serial: info?.serial,
@@ -34,6 +38,7 @@ export async function nasStatus(dsm: SynoClient) {
     cpu_load: util?.cpu,
     memory: util?.memory,
     fan: info?.systempwarn,
+    warnings: readWarnings([utilization]),
   };
 }
 

@@ -1,7 +1,7 @@
 /**
  * Shared output shapes for the update-availability tools and the digest, plus the
  * OS-update response mapper. Dependency-free (no imports) so callers can use these
- * without pulling in a `tools/` module's graph — and so `tools/router.ts` and
+ * without pulling in a `tools/` module's graph, so `tools/srm.ts` and
  * `tools/updates.ts` can both use `mapOsUpdate` without importing each other.
  */
 

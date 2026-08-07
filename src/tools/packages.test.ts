@@ -14,11 +14,12 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync } from "node:fs";
-import type { Config } from "../config.js";
-import type { SynoClient, DsmCallOptions } from "../dsm.js";
+import type { RuntimeConfig } from "../config.js";
+import type { SynoClient, SynologyCallOptions } from "../client.js";
 import {
   nasPackageInstall,
   nasPackageUninstall,
+  nasPackageControl,
   nasPackageInfo,
   nasPackagesCheckUpdates,
 } from "./packages.js";
@@ -26,7 +27,7 @@ import {
 // Audit records are written to a throwaway local dir per test run.
 const cfg = {
   auditLogDir: mkdtempSync(path.join(os.tmpdir(), "synmcp-test-")),
-} as unknown as Config;
+} as unknown as RuntimeConfig;
 
 // Field names mirror the real production-verified SYNO.Core.Package.Server.list
 // shape: display name is `dname` (not `name`), publisher is `maintainer`
@@ -70,7 +71,7 @@ function makeFake(queue: Array<{ pkg: string }>) {
     const c = CATALOG.find((x) => x.id === id)!;
     return { id, name: c.dname, version: c.version, additional: { status: "running", install_type: "", startable: true } };
   };
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     const params = (opts.params ?? {}) as Record<string, unknown>;
     calls.push({ api: opts.api, method: opts.method, params });
     switch (`${opts.api}.${opts.method}`) {
@@ -141,6 +142,11 @@ test("accept_dependencies: installs the resolved queue, dependency first", { tim
   assert.deepEqual([...installed].sort(), ["SynologyDrive", "UniversalViewer"]);
   const order = commits(calls).map((c) => String(JSON.parse(String(c.params.path))).split("/").pop());
   assert.deepEqual(order, ["UniversalViewer", "SynologyDrive"]);
+  assert.equal(
+    calls.filter((call) => call.api === "SYNO.Core.Package.Server" && call.method === "list").length,
+    1,
+    "the dependency queue reuses one catalog response"
+  );
 });
 
 // ── Uninstall: data-decision gate ──────────────────────────────────────────
@@ -153,7 +159,7 @@ function makeUninstallFake(pkg: { id: string; version: string; status: string; i
   let present = true;
   let status = pkg.status;
   const calls: Recorded[] = [];
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     const params = (opts.params ?? {}) as Record<string, unknown>;
     calls.push({ api: opts.api, method: opts.method, params });
     switch (`${opts.api}.${opts.method}`) {
@@ -185,6 +191,42 @@ function makeUninstallFake(pkg: { id: string; version: string; status: string; i
 
 const uninstallCalls = (calls: Recorded[]) =>
   calls.filter((c) => c.api === "SYNO.Core.Package.Uninstallation" && c.method === "uninstall");
+
+test("package control reuses the state observed by its verification poll", async () => {
+  let status = "stopped";
+  let listCalls = 0;
+  let pendingReads = 0;
+  const dsm = {
+    call: async (opts: SynologyCallOptions) => {
+      if (opts.api === "SYNO.Core.Package" && opts.method === "list") {
+        listCalls++;
+        if (pendingReads > 0 && --pendingReads === 0) status = "running";
+        return {
+          packages: [
+            {
+              id: "TextEditor",
+              version: "1.0.0-1000",
+              additional: { status, install_type: "", startable: true },
+            },
+          ],
+        };
+      }
+      if (opts.api === "SYNO.Core.Package.Control" && opts.method === "start") {
+        pendingReads = 2;
+        return {};
+      }
+      throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+    },
+  } as SynoClient;
+
+  const result = await nasPackageControl(cfg, dsm, {
+    name: "TextEditor",
+    action: "start",
+  });
+  assert.equal(result.verified, true);
+  assert.equal(result.after?.status, "running");
+  assert.equal(listCalls, 3, "the verification poll result is the returned post-state");
+});
 
 test("data-bearing package: gates with needs_data_confirmation, mutates nothing", { timeout: 3000 }, async () => {
   const { dsm, calls, isPresent } = makeUninstallFake({ id: "ActiveBackup", version: "3.2.0-25053", status: "running", isUninstallPages: true });
@@ -229,7 +271,7 @@ test("no-data package: uninstalls directly without gating", { timeout: 3000 }, a
 // against production caught nas_package_info silently dropping these fields) ─
 
 function makeCatalogFake() {
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     if (opts.api === "SYNO.Core.Package.Server" && opts.method === "list") {
       return { packages: CATALOG };
     }
@@ -272,7 +314,7 @@ test("nas_packages_check_updates: pending entries carry the real display name", 
 // The normalizer is the one place the dname→id fallback lives, so a catalog row
 // without `dname` must surface `name: <id>` (never undefined) on every read path.
 function makeNamelessCatalogFake() {
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     if (opts.api === "SYNO.Core.Package.Server" && opts.method === "list") {
       return { packages: [{ id: "MariaDB10", version: "10.11.6-1405" }] }; // no dname
     }
@@ -302,7 +344,7 @@ test("normalizer: dname-less row falls back to id on nas_packages_check_updates"
 test("install: a dropped connection mid-commit degrades to the version-flip poll", { timeout: 3000 }, async () => {
   const installed = new Set<string>();
   let pendingId = "";
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     switch (`${opts.api}.${opts.method}`) {
       case "SYNO.Core.Package.list":
         return { packages: [...installed].map((id) => ({ id, name: id, version: "1.0.0-1000", additional: { status: "running" } })) };

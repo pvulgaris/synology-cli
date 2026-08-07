@@ -13,7 +13,8 @@
  * SYNO.Core.User.PasswordPolicy           — password policy (v1)
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
+import { readSource, readWarnings } from "./partial.js";
 
 const SCAN_POLL_MS = 2000;
 const SCAN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -170,37 +171,36 @@ export async function nasFirewallList(dsm: SynoClient) {
   // value = enum rejection. Iterating both types captures the full allowlist
   // + denylist (lockout history isn't on this surface — that's the live
   // autoblock entries, which DSM doesn't seem to expose as a query at all).
-  const [firewall, profileNames, autoblock, allowList, denyList, interfaces] =
-    await Promise.all([
-      dsm
-        .call({ api: "SYNO.Core.Security.Firewall", method: "get", version: 1 })
-        .catch(() => null),
-      dsm
-        .call({ api: "SYNO.Core.Security.Firewall.Profile", method: "list", version: 1 })
-        .catch(() => ({ profile_names: [] as string[] })),
-      dsm
-        .call({ api: "SYNO.Core.Security.AutoBlock", method: "get", version: 1 })
-        .catch(() => null),
-      dsm
-        .call({
+  const sources = await Promise.all([
+      readSource("firewall", () =>
+        dsm.call({ api: "SYNO.Core.Security.Firewall", method: "get", version: 1 })
+      ),
+      readSource("firewall_profiles", () =>
+        dsm.call({ api: "SYNO.Core.Security.Firewall.Profile", method: "list", version: 1 })
+      ),
+      readSource("auto_block", () =>
+        dsm.call({ api: "SYNO.Core.Security.AutoBlock", method: "get", version: 1 })
+      ),
+      readSource("auto_block_allow", () => dsm.call({
           api: "SYNO.Core.Security.AutoBlock.Rules",
           method: "list",
           version: 1,
           params: { type: "allow", offset: 0, limit: -1 },
-        })
-        .catch(() => null),
-      dsm
-        .call({
+        })),
+      readSource("auto_block_deny", () => dsm.call({
           api: "SYNO.Core.Security.AutoBlock.Rules",
           method: "list",
           version: 1,
           params: { type: "deny", offset: 0, limit: -1 },
-        })
-        .catch(() => null),
-      dsm
-        .call<any[]>({ api: "SYNO.Core.Network.Interface", method: "list", version: 1 })
-        .catch(() => [] as any[]),
+        })),
+      readSource("network_interfaces", () =>
+        dsm.call<any[]>({ api: "SYNO.Core.Network.Interface", method: "list", version: 1 })
+      ),
     ]);
+  const [firewall, profileNames, autoblock, allowList, denyList, interfacesValue] =
+    sources.map((source) => source.value as any);
+  const interfaces = interfacesValue ?? [];
+  const warnings = readWarnings(sources);
 
   const ifnames = (Array.isArray(interfaces) ? interfaces : [])
     .map((i: any) => i?.ifname)
@@ -208,15 +208,16 @@ export async function nasFirewallList(dsm: SynoClient) {
 
   const profiles = await Promise.all(
     (profileNames?.profile_names ?? []).map(async (name: string) => {
-      const detail = await dsm
-        .call({
+      const source = await readSource(`firewall_profile:${name}`, () =>
+        dsm.call({
           api: "SYNO.Core.Security.Firewall.Profile",
           method: "get",
           version: 1,
           params: { name },
         })
-        .catch(() => null);
-      return { name, detail };
+      );
+      if (source.error) warnings.push({ source: source.source, error: source.error });
+      return { name, detail: source.value };
     })
   );
 
@@ -231,8 +232,11 @@ export async function nasFirewallList(dsm: SynoClient) {
         version: 2,
         params: { configs },
       });
-    } catch {
-      // surface as null
+    } catch (err) {
+      warnings.push({
+        source: "dos_protection",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -243,6 +247,7 @@ export async function nasFirewallList(dsm: SynoClient) {
     auto_block_allow_list: allowList?.ip_info ?? [],
     auto_block_deny_list: denyList?.ip_info ?? [],
     dos_protection: dosProtection,
+    warnings,
   };
 }
 
@@ -252,17 +257,19 @@ export async function nasFirewallList(dsm: SynoClient) {
 // request itself is form-encoded like everything else. (Working clients
 // confirmed: synaudit, NielsKrijnen, N4S4, synology-community/go-synology.)
 export async function nasDsmSecuritySettings(dsm: SynoClient) {
-  const [security, web, tlsProfile, terminal, smb, nfs, autoUpdate, passwd, activeInsight] = await Promise.all([
-    dsm.call({ api: "SYNO.Core.Security.DSM", method: "get", version: 4 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.Web.DSM", method: "get", version: 2 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.Web.Security.TLSProfile", method: "get", version: 1 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.Terminal", method: "get", version: 3 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.FileServ.SMB", method: "get", version: 3 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.FileServ.NFS", method: "get", version: 1 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.Upgrade.Setting", method: "get", version: 3 }).catch(() => null),
-    dsm.call({ api: "SYNO.Core.User.PasswordPolicy", method: "get", version: 1 }).catch(() => null),
-    dsm.call({ api: "SYNO.ActiveInsight.Setting", method: "get", version: 1 }).catch(() => null),
+  const sources = await Promise.all([
+    readSource("security", () => dsm.call({ api: "SYNO.Core.Security.DSM", method: "get", version: 4 })),
+    readSource("web", () => dsm.call({ api: "SYNO.Core.Web.DSM", method: "get", version: 2 })),
+    readSource("tls_profile", () => dsm.call({ api: "SYNO.Core.Web.Security.TLSProfile", method: "get", version: 1 })),
+    readSource("terminal", () => dsm.call({ api: "SYNO.Core.Terminal", method: "get", version: 3 })),
+    readSource("smb", () => dsm.call({ api: "SYNO.Core.FileServ.SMB", method: "get", version: 3 })),
+    readSource("nfs", () => dsm.call({ api: "SYNO.Core.FileServ.NFS", method: "get", version: 1 })),
+    readSource("auto_update", () => dsm.call({ api: "SYNO.Core.Upgrade.Setting", method: "get", version: 3 })),
+    readSource("password_policy", () => dsm.call({ api: "SYNO.Core.User.PasswordPolicy", method: "get", version: 1 })),
+    readSource("active_insight", () => dsm.call({ api: "SYNO.ActiveInsight.Setting", method: "get", version: 1 })),
   ]);
+  const [security, web, tlsProfile, terminal, smb, nfs, autoUpdate, passwd, activeInsight] =
+    sources.map((source) => source.value as any);
   const tlsServices = (tlsProfile?.services ?? {}) as Record<string, any>;
   return {
     web_hardening: {
@@ -317,5 +324,6 @@ export async function nasDsmSecuritySettings(dsm: SynoClient) {
     active_insight: {
       monitoring_service: activeInsight?.monitoring_service ?? null,
     },
+    warnings: readWarnings(sources),
   };
 }

@@ -12,13 +12,13 @@
  * IDs, so reshaping output here would silently break those rules.
  */
 
-import type { Config } from "./config.js";
-import type { SynoClient } from "./dsm.js";
+import type { Platform, RuntimeConfig, TargetConfig } from "./config.js";
+import type { SynoClient } from "./client.js";
 import {
-  dsmMethodMayMutate,
+  methodMayMutate,
   isSensitiveParamKey,
   redactSensitiveValues,
-} from "./dsm.js";
+} from "./client.js";
 import { nasStatus, nasStorageHealth } from "./tools/system.js";
 import {
   nasPackagesList,
@@ -40,7 +40,7 @@ import { nasExternalAccess } from "./tools/external.js";
 import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
 import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "./tools/updates.js";
-import { routerSrmOsCheckUpdate } from "./tools/router.js";
+import { routerSrmOsCheckUpdate } from "./tools/srm.js";
 import {
   nasHyperbackupTasks,
   nasShareSnapshots,
@@ -60,7 +60,7 @@ import {
 import { withAudit } from "./audit.js";
 
 /** A bad invocation (missing arg, unknown value, malformed param) as opposed to a
- *  runtime/DSM failure. The top-level catch maps this to exit 2, keeping the
+ *  runtime/API failure. The top-level catch maps this to exit 2, keeping the
  *  documented "2 on a usage error" contract instead of collapsing everything to 1. */
 export class UsageError extends Error {
   constructor(message: string) {
@@ -70,9 +70,9 @@ export class UsageError extends Error {
 }
 
 export interface CommandContext {
-  cfg: Config;
-  dsm: SynoClient;
-  router: SynoClient | null;
+  runtime: RuntimeConfig;
+  target: TargetConfig;
+  client: SynoClient;
   /** Positional arguments after the command path. */
   args: string[];
   /** Parsed `--flag` / `--flag=value` tokens. Bare flags are `true`. */
@@ -83,34 +83,74 @@ export interface Command {
   /** Space-joined command path, e.g. "packages install". */
   name: string;
   summary: string;
-  /** Usage suffix shown after the command name in help, e.g. "<name> [--version=X]". */
-  usage?: string;
+  platforms: readonly Platform[];
+  /** Required positional arguments after the command path. */
+  args?: readonly string[];
+  /** Optional trailing positional values, used by raw k=v parameters. */
+  variadic?: string;
+  flags?: Readonly<Record<string, FlagSpec>>;
+  scope?: "target";
   /**
-   * Mutating commands require an explicit --yes. The daemon relied on the MCP
-   * client to prompt before invoking a write tool; a CLI has no such client, so
-   * the confirmation gate has to live here or it does not exist at all.
+   * Mutating commands require an explicit --yes because the CLI does not prompt.
    */
   mutating?: boolean;
   run(ctx: CommandContext): Promise<unknown>;
 }
 
-/** Copy a param map with secret-valued keys masked. The key stays (so the audit
- *  shows what was sent) but the value becomes "***". */
-export function redactSecrets(
-  params: Record<string, string>
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params)) {
-    out[k] = isSensitiveParamKey(k) ? "***" : v;
-  }
-  return out;
+export interface AggregateCommandContext {
+  runtime: RuntimeConfig;
+  clients: Partial<Record<Platform, SynoClient>>;
+  args: string[];
+  flags: Record<string, string | true>;
 }
 
-/** Positional argument or a clear error naming what was expected. */
-function arg(ctx: CommandContext, index: number, name: string): string {
-  const v = ctx.args[index];
-  if (!v) throw new UsageError(`missing required argument <${name}>`);
-  return v;
+export interface AggregateCommand extends Omit<Command, "scope" | "run"> {
+  scope: "aggregate";
+  run(ctx: AggregateCommandContext): Promise<unknown>;
+}
+
+export type RegisteredCommand = Command | AggregateCommand;
+
+type FlagType = "boolean" | "string" | "integer";
+export type FlagSpec =
+  | FlagType
+  | { type: FlagType; required?: boolean; value?: string };
+
+function flagType(spec: FlagSpec): FlagType {
+  return typeof spec === "string" ? spec : spec.type;
+}
+
+function commandFlags(
+  command: RegisteredCommand
+): Readonly<Record<string, FlagSpec>> {
+  return {
+    verbose: "boolean",
+    ...(command.mutating || command.name === "raw" ? { yes: "boolean" as const } : {}),
+    ...(command.scope !== "aggregate" && command.platforms.length > 1
+      ? { target: { type: "string" as const, value: "dsm|srm" } }
+      : {}),
+    ...(command.flags ?? {}),
+  };
+}
+
+export function commandUsage(command: RegisteredCommand): string {
+  const positionals = (command.args ?? []).map((name) => `<${name}>`);
+  if (command.variadic) positionals.push(`[${command.variadic} ...]`);
+  const flags = Object.entries(commandFlags(command)).map(([name, spec]) => {
+    const type = flagType(spec);
+    const value = typeof spec === "string" ? undefined : spec.value;
+    const rendered =
+      type === "boolean"
+        ? `--${name}`
+        : `--${name}=${value ?? (type === "integer" ? "N" : "VALUE")}`;
+    return typeof spec !== "string" && spec.required ? rendered : `[${rendered}]`;
+  });
+  return [...positionals, ...flags].join(" ");
+}
+
+/** Validation guarantees required positional arguments before dispatch. */
+function arg(ctx: CommandContext, index: number): string {
+  return ctx.args[index];
 }
 
 function boolFlag(ctx: CommandContext, name: string): boolean {
@@ -125,34 +165,26 @@ function strFlag(ctx: CommandContext, name: string): string | undefined {
 
 function intFlag(ctx: CommandContext, name: string): number | undefined {
   const raw = strFlag(ctx, name);
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  if (!Number.isInteger(value)) {
-    throw new UsageError(`--${name} must be an integer`);
-  }
-  return value;
+  return raw === undefined ? undefined : Number(raw);
 }
 
-function requireRouter(ctx: CommandContext): SynoClient {
-  if (!ctx.router) {
-    throw new Error(
-      "no router configured — set SRM_BASE_URL to enable router commands"
-    );
-  }
-  return ctx.router;
-}
+const DSM = ["dsm"] as const;
+const SRM = ["srm"] as const;
+const SYNOLOGY = ["dsm", "srm"] as const;
 
-export const COMMANDS: Command[] = [
+export const COMMANDS: RegisteredCommand[] = [
   // ── System ────────────────────────────────────────────────────────────────
   {
     name: "status",
     summary: "DSM system status: model, version, uptime, temperature, CPU/memory load.",
-    run: ({ dsm }) => nasStatus(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasStatus(client),
   },
   {
     name: "storage",
     summary: "Volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model).",
-    run: ({ dsm }) => nasStorageHealth(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasStorageHealth(client),
   },
 
   // ── Shares & snapshots ────────────────────────────────────────────────────
@@ -160,21 +192,24 @@ export const COMMANDS: Command[] = [
     name: "shares list",
     summary:
       "Shared folders with encryption, quota, recycle-bin, snapshot support, BTRFS COW flag.",
-    run: ({ dsm }) => nasSharesList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasSharesList(client),
   },
   {
     name: "shares snapshots",
     summary:
       "Btrfs snapshots for one share: timestamps, immutable/WORM lock state and window, newest/oldest, immutable count.",
-    usage: "<share>",
-    run: (ctx) => nasShareSnapshots(ctx.dsm, { share: arg(ctx, 0, "share") }),
+    platforms: DSM,
+    args: ["share"],
+    run: (ctx) => nasShareSnapshots(ctx.client, { share: arg(ctx, 0) }),
   },
   {
     name: "shares snapshot-config",
     summary:
       "Snapshot task config for one share: schedule (enabled, time, days, next run) and retention (Smart Recycle counts, retain days).",
-    usage: "<share>",
-    run: (ctx) => nasShareSnapshotConfig(ctx.dsm, { share: arg(ctx, 0, "share") }),
+    platforms: DSM,
+    args: ["share"],
+    run: (ctx) => nasShareSnapshotConfig(ctx.client, { share: arg(ctx, 0) }),
   },
 
   // ── Backup & scheduled tasks ──────────────────────────────────────────────
@@ -182,42 +217,48 @@ export const COMMANDS: Command[] = [
     name: "backup tasks",
     summary:
       "Hyper Backup tasks: destination, client-side encryption, schedule, last result, next run.",
-    run: ({ dsm }) => nasHyperbackupTasks(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasHyperbackupTasks(client),
   },
   {
     name: "tasks list",
     summary: "DSM Task Scheduler entries with schedule and script notification config.",
-    run: ({ dsm }) => nasTaskschedulerList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasTaskschedulerList(client),
   },
 
   // ── Container Manager ───────────────────────────────────────────────────
   {
     name: "containers list",
     summary: "Container Manager containers with image, state, health, exit code, and restart count.",
-    run: ({ dsm }) => nasContainersList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasContainersList(client),
   },
   {
     name: "containers logs",
     summary: "Recent logs for one container in chronological order.",
-    usage: "<name> [--limit=N]",
+    platforms: DSM,
+    args: ["name"],
+    flags: { limit: "integer" },
     run: (ctx) =>
-      nasContainerLogs(ctx.dsm, {
-        name: arg(ctx, 0, "name"),
+      nasContainerLogs(ctx.client, {
+        name: arg(ctx, 0),
         limit: intFlag(ctx, "limit"),
       }),
   },
   {
     name: "containers control",
     summary: "Start or stop one container and verify its resulting state.",
-    usage: "<name> <start|stop>",
+    platforms: DSM,
+    args: ["name", "start|stop"],
     mutating: true,
     run: (ctx) => {
-      const action = arg(ctx, 1, "start|stop");
+      const action = arg(ctx, 1);
       if (action !== "start" && action !== "stop") {
         throw new UsageError(`invalid action "${action}"; expected start or stop`);
       }
-      return nasContainerControl(ctx.cfg, ctx.dsm, {
-        name: arg(ctx, 0, "name"),
+      return nasContainerControl(ctx.runtime, ctx.client, {
+        name: arg(ctx, 0),
         action,
       });
     },
@@ -225,72 +266,80 @@ export const COMMANDS: Command[] = [
   {
     name: "containers remove",
     summary: "Remove one container after it is stopped.",
-    usage: "<name>",
+    platforms: DSM,
+    args: ["name"],
     mutating: true,
     run: (ctx) =>
-      nasContainerRemove(ctx.cfg, ctx.dsm, {
-        name: arg(ctx, 0, "name"),
+      nasContainerRemove(ctx.runtime, ctx.client, {
+        name: arg(ctx, 0),
       }),
   },
   {
     name: "containers projects list",
     summary: "Container Manager Compose projects with ids, status, and container counts.",
-    run: ({ dsm }) => nasContainerProjectsList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasContainerProjectsList(client),
   },
   {
     name: "containers projects info",
     summary: "One Compose project's state and containers, resolved by name or id; omits Compose content.",
-    usage: "<name-or-id>",
-    run: (ctx) => nasContainerProjectInfo(ctx.dsm, arg(ctx, 0, "name-or-id")),
+    platforms: DSM,
+    args: ["name-or-id"],
+    run: (ctx) => nasContainerProjectInfo(ctx.client, arg(ctx, 0)),
   },
   {
     name: "containers projects deploy",
     summary:
       "Stop an existing project, replace its Compose definition from a local file, build it, and verify readiness without logging the file contents.",
-    usage: "<name-or-id> --file=PATH",
+    platforms: DSM,
+    args: ["name-or-id"],
+    flags: { file: { type: "string", required: true, value: "PATH" } },
     mutating: true,
     run: (ctx) => {
-      const file = strFlag(ctx, "file");
-      if (!file) throw new UsageError("missing required flag --file=PATH");
-      return nasContainerProjectDeploy(ctx.cfg, ctx.dsm, {
-        project: arg(ctx, 0, "name-or-id"),
-        file,
+      return nasContainerProjectDeploy(ctx.runtime, ctx.client, {
+        project: arg(ctx, 0),
+        file: strFlag(ctx, "file")!,
       });
     },
   },
   {
     name: "containers images list",
     summary: "Container Manager image inventory with repository, tags, id, size, and update flag.",
-    run: ({ dsm }) => nasContainerImagesList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasContainerImagesList(client),
   },
 
   // ── Packages ──────────────────────────────────────────────────────────────
   {
     name: "packages list",
     summary: "Installed packages with versions, running state, and is_system flag.",
-    run: ({ dsm }) => nasPackagesList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasPackagesList(client),
   },
   {
     name: "packages updates",
     summary: "Packages with pending updates from the Synology repo (excludes DSM self-update).",
-    run: ({ dsm }) => nasPackagesCheckUpdates(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasPackagesCheckUpdates(client),
   },
   {
     name: "packages info",
     summary: "Installed and available versions plus publisher, changelog, dependencies, and size.",
-    usage: "<name>",
-    run: (ctx) => nasPackageInfo(ctx.dsm, { name: arg(ctx, 0, "name") }),
+    platforms: DSM,
+    args: ["name"],
+    run: (ctx) => nasPackageInfo(ctx.client, { name: arg(ctx, 0) }),
   },
   {
     name: "packages install",
     summary:
       "Install a package. Refuses DSM/kernel and already-installed packages. Without --accept-dependencies, a package with dependencies returns the plan instead of installing.",
-    usage: "<name> [--version=X] [--accept-dependencies]",
+    platforms: DSM,
+    args: ["name"],
+    flags: { "accept-dependencies": "boolean" },
     mutating: true,
     run: (ctx) =>
-      nasPackageInstall(ctx.cfg, ctx.dsm, {
-        name: arg(ctx, 0, "name"),
-        version: strFlag(ctx, "version"),
+      nasPackageInstall(ctx.runtime, ctx.client, {
+        name: arg(ctx, 0),
         accept_dependencies: boolFlag(ctx, "accept-dependencies"),
       }),
   },
@@ -298,33 +347,37 @@ export const COMMANDS: Command[] = [
     name: "packages update",
     summary:
       "Update a package to the latest version. Refuses DSM/kernel and already-current packages. Verifies post-state.",
-    usage: "<name>",
+    platforms: DSM,
+    args: ["name"],
     mutating: true,
-    run: (ctx) => nasPackageUpdate(ctx.cfg, ctx.dsm, { name: arg(ctx, 0, "name") }),
+    run: (ctx) => nasPackageUpdate(ctx.runtime, ctx.client, { name: arg(ctx, 0) }),
   },
   {
     name: "packages uninstall",
     summary:
       "Uninstall a package, PRESERVING its data. Requires --keep-data to proceed. Data deletion is not supported here; use the DSM UI.",
-    usage: "<name> [--keep-data]",
+    platforms: DSM,
+    args: ["name"],
+    flags: { "keep-data": "boolean" },
     mutating: true,
     run: (ctx) =>
-      nasPackageUninstall(ctx.cfg, ctx.dsm, {
-        name: arg(ctx, 0, "name"),
+      nasPackageUninstall(ctx.runtime, ctx.client, {
+        name: arg(ctx, 0),
         keep_data: boolFlag(ctx, "keep-data"),
       }),
   },
   {
     name: "packages control",
     summary: "Start/stop/restart a package. Idempotent; verifies via status poll.",
-    usage: "<name> <start|stop|restart>",
+    platforms: DSM,
+    args: ["name", "start|stop|restart"],
     mutating: true,
     run: (ctx) => {
-      const action = arg(ctx, 1, "start|stop|restart");
+      const action = arg(ctx, 1);
       if (action !== "start" && action !== "stop" && action !== "restart") {
-        throw new UsageError(`invalid action "${action}" — expected start, stop, or restart`);
+        throw new UsageError(`invalid action "${action}"; expected start, stop, or restart`);
       }
-      return nasPackageControl(ctx.cfg, ctx.dsm, { name: arg(ctx, 0, "name"), action });
+      return nasPackageControl(ctx.runtime, ctx.client, { name: arg(ctx, 0), action });
     },
   },
 
@@ -333,40 +386,47 @@ export const COMMANDS: Command[] = [
     name: "security scan",
     summary:
       "Run DSM Security Advisor; returns per-status check counts plus the failing rules. Polls until the async scan finishes.",
-    run: ({ dsm }) => nasSecurityAdvisorScan(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasSecurityAdvisorScan(client),
   },
   {
     name: "security settings",
     summary:
       "DSM hardening posture: web/TLS, SSH/Telnet, SMB, NFS, auto-update, password policy, telemetry.",
-    run: ({ dsm }) => nasDsmSecuritySettings(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasDsmSecuritySettings(client),
   },
   {
     name: "security firewall",
     summary:
       "Firewall profiles, auto-block (failed-login lockout), and per-adapter DoS protection.",
-    run: ({ dsm }) => nasFirewallList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasFirewallList(client),
   },
   {
     name: "users list",
     summary: "DSM user accounts: name, uid, 2FA state, expired flag, email.",
-    run: ({ dsm }) => nasUsersList(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasUsersList(client),
   },
   {
     name: "external",
     summary:
       "External-facing posture: QuickConnect, DDNS, App Portal, reverse proxy, port forwarding.",
-    run: ({ dsm }) => nasExternalAccess(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasExternalAccess(client),
   },
   {
     name: "notifications",
     summary: "SMTP notification config: server, port, SSL, verify-cert, sender, recipient count.",
-    run: ({ dsm }) => nasNotifications(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasNotifications(client),
   },
   {
     name: "certificates",
     summary: "DSM certificates with derived days_until_expiry per cert.",
-    run: ({ dsm }) => nasCertificates(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasCertificates(client),
   },
 
   // ── Updates ───────────────────────────────────────────────────────────────
@@ -374,56 +434,93 @@ export const COMMANDS: Command[] = [
     name: "updates",
     summary:
       "Aggregated pending updates across DSM OS, NAS packages, router OS, and router packages, in one result.",
-    run: ({ dsm, router }) => synologyUpdateDigest(dsm, router),
+    platforms: SYNOLOGY,
+    scope: "aggregate",
+    run: ({ clients }) =>
+      synologyUpdateDigest(clients.dsm ?? null, clients.srm ?? null),
   },
   {
     name: "dsm update-check",
     summary: "Whether a DSM OS update is available (read-only; does not download or apply).",
-    run: ({ dsm }) => nasDsmOsCheckUpdate(dsm),
+    platforms: DSM,
+    run: ({ client }) => nasDsmOsCheckUpdate(client),
   },
   {
     name: "router update-check",
     summary: "Whether an SRM router OS update is available (read-only).",
-    run: (ctx) => routerSrmOsCheckUpdate(requireRouter(ctx)),
+    platforms: SRM,
+    run: ({ client }) => routerSrmOsCheckUpdate(client),
   },
 
   // ── Escape hatch ──────────────────────────────────────────────────────────
   {
     name: "raw",
     summary:
-      "Call any DSM Web API endpoint directly. Params are form-encoded k=v; strings need JSON quoting (name='\"FileStation\"'). GET unless --post.",
-    usage: "<api> <method> [--version=N] [--post] [k=v ...]",
+      "Call any Synology Web API endpoint directly on the selected target. Accepts k=v or --params-json. GET unless --post.",
+    platforms: SYNOLOGY,
+    args: ["api", "method"],
+    variadic: "k=v",
+    flags: {
+      version: { type: "integer", value: "N" },
+      post: "boolean",
+      "params-json": { type: "string", value: "JSON" },
+    },
     run: (ctx) => {
-      const api = arg(ctx, 0, "api");
-      const method = arg(ctx, 1, "method");
+      const api = arg(ctx, 0);
+      const method = arg(ctx, 1);
       const params: Record<string, string> = {};
+      const paramsJson = strFlag(ctx, "params-json");
+      if (paramsJson && ctx.args.length > 2) {
+        throw new UsageError("use either --params-json or trailing k=v parameters, not both");
+      }
+      if (paramsJson) {
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(paramsJson);
+        } catch {
+          throw new UsageError("--params-json must be valid JSON");
+        }
+        if (!decoded || Array.isArray(decoded) || typeof decoded !== "object") {
+          throw new UsageError("--params-json must contain a JSON object");
+        }
+        for (const [key, value] of Object.entries(decoded)) {
+          params[key] = JSON.stringify(value);
+        }
+      }
       for (const tok of ctx.args.slice(2)) {
         const eq = tok.indexOf("=");
         if (eq < 0) {
-          throw new UsageError(`unparsable param "${tok}" — expected k=v`);
+          throw new UsageError(`unparsable param "${tok}"; expected k=v`);
         }
         params[tok.slice(0, eq)] = tok.slice(eq + 1);
       }
-      const versionFlag = strFlag(ctx, "version");
-      const version = versionFlag ? parseInt(versionFlag, 10) : 1;
+      const version = intFlag(ctx, "version") ?? 1;
       const post = boolFlag(ctx, "post");
       const sensitiveResponse =
         Object.keys(params).some(isSensitiveParamKey) ||
         (api === "SYNO.Docker.Project" && ["create", "get", "update"].includes(method));
       const call = () =>
-        ctx.dsm.call({ api, method, version, post, params, sensitiveResponse });
+        ctx.client.call({ api, method, version, post, params, sensitiveResponse });
       // DSM has mutating endpoints that use GET, so method semantics join the
       // transport in deciding whether this call needs the audit trail.
-      if (!post && !dsmMethodMayMutate(method)) return call();
+      if (!post && !methodMayMutate(method)) return call();
       let result: unknown;
       return withAudit(
-        ctx.cfg,
+        ctx.runtime,
         // Redact before recording: `raw` accepts arbitrary params, so a POST to
         // an auth or token endpoint could carry a password or TOTP seed. The
         // audit log persists to disk, so those must not land in it verbatim (the
-        // live DSM trace already drops them). The redacted map still shows which
+        // live API trace already drops them). The redacted map still shows which
         // keys were sent.
-        { tool: `raw:${api}.${method}`, args: { version, params: redactSecrets(params) }, before: null },
+        {
+          tool: `raw:${api}.${method}`,
+          args: {
+            target: ctx.target.platform,
+            version,
+            params: redactSensitiveValues(params),
+          },
+          before: null,
+        },
         async () => {
           result = await call();
           return { after: redactSensitiveValues(result), ok: true };
@@ -469,20 +566,93 @@ export function parseArgv(input: string[]): Parsed {
   return { argv, flags };
 }
 
+/** Reject input the selected command does not declare before loading credentials. */
+export function validateInvocation(
+  command: RegisteredCommand,
+  args: string[],
+  flags: Record<string, string | true>
+): void {
+  const accepted = commandFlags(command);
+  for (const [name, value] of Object.entries(flags)) {
+    const spec = accepted[name];
+    if (!spec) throw new UsageError(`unknown flag --${name} for "${command.name}"`);
+    const type = flagType(spec);
+    if (type === "boolean" && ![true, "true", "false"].includes(value)) {
+      throw new UsageError(`--${name} must be a boolean`);
+    }
+    if (type !== "boolean" && typeof value !== "string") {
+      throw new UsageError(`--${name} requires a value`);
+    }
+    if (type === "integer" && !Number.isInteger(Number(value))) {
+      throw new UsageError(`--${name} must be an integer`);
+    }
+  }
+  for (const [name, spec] of Object.entries(accepted)) {
+    if (typeof spec !== "string" && spec.required && flags[name] === undefined) {
+      throw new UsageError(`missing required flag --${name}=${spec.value ?? "VALUE"}`);
+    }
+  }
+
+  const required = command.args?.length ?? 0;
+  if (args.length < required) {
+    throw new UsageError(`missing required argument <${command.args![args.length]}>`);
+  }
+  if (!command.variadic && args.length > required) {
+    throw new UsageError(`unexpected argument "${args[required]}"`);
+  }
+}
+
+export function selectPlatform(
+  command: RegisteredCommand,
+  flags: Record<string, string | true>
+): Platform {
+  const explicit = flags.target;
+  if (explicit !== undefined) {
+    if (explicit !== "dsm" && explicit !== "srm") {
+      throw new UsageError("--target must be dsm or srm");
+    }
+    if (!command.platforms.includes(explicit)) {
+      throw new UsageError(`"${command.name}" does not support target ${explicit}`);
+    }
+    return explicit;
+  }
+  return command.platforms.length === 1 ? command.platforms[0] : "dsm";
+}
+
+export function commandManifest() {
+  return COMMANDS.map((command) => ({
+    name: command.name,
+    summary: command.summary,
+    usage: commandUsage(command),
+    platforms: command.platforms,
+    scope: command.scope ?? "target",
+    mutating: command.mutating ?? false,
+    args: command.args ?? [],
+    variadic: command.variadic ?? null,
+    flags: Object.fromEntries(
+      Object.entries(commandFlags(command)).map(([name, spec]) => [
+        name,
+        typeof spec === "string"
+          ? { type: spec, required: false }
+          : { type: spec.type, required: spec.required ?? false, value: spec.value },
+      ])
+    ),
+  }));
+}
+
 /**
- * Writes need an explicit --yes. Under MCP the client prompted the user before
- * invoking a write tool; nothing plays that role for a CLI, so without this an
- * agent composing commands could uninstall a package with no confirmation step.
+ * Writes need an explicit --yes because the CLI does not prompt. Without this,
+ * an agent could uninstall a package with no confirmation step.
  */
 export function requiresConfirmation(
-  command: Command,
+  command: RegisteredCommand,
   flags: Record<string, string | true>,
   args: string[] = []
 ): boolean {
   if (command.mutating) return true;
   if (command.name !== "raw") return false;
   const post = flags.post === true || flags.post === "true";
-  return post || (args[1] ? dsmMethodMayMutate(args[1]) : false);
+  return post || (args[1] ? methodMayMutate(args[1]) : false);
 }
 
 /**
@@ -492,7 +662,7 @@ export function requiresConfirmation(
  */
 export function resolveCommand(
   argv: string[]
-): { command: Command; args: string[] } | null {
+): { command: RegisteredCommand; args: string[] } | null {
   const byLength = [...COMMANDS].sort(
     (a, b) => b.name.split(" ").length - a.name.split(" ").length
   );

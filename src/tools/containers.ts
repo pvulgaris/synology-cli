@@ -9,12 +9,12 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import { setTimeout as sleep } from "node:timers/promises";
 
-import type { Config } from "../config.js";
-import type { SynoClient } from "../dsm.js";
-import { DsmError, isSoftTransportError } from "../dsm.js";
+import type { RuntimeConfig } from "../config.js";
+import type { SynoClient } from "../client.js";
+import { SynologyApiError, isSoftTransportError } from "../client.js";
 import { withAudit } from "../audit.js";
+import { poll } from "./poll.js";
 
 interface ProjectSummaryWire {
   id?: string;
@@ -158,6 +158,14 @@ export async function nasContainerProjectInfo(
   nameOrId: string
 ): Promise<ProjectState> {
   const { id, summary } = await resolveProject(dsm, nameOrId);
+  return projectInfoById(dsm, id, summary);
+}
+
+async function projectInfoById(
+  dsm: SynoClient,
+  id: string,
+  summary: ProjectSummaryWire
+): Promise<ProjectState> {
   const detail = await dsm.call<ProjectSummaryWire>({
     api: "SYNO.Docker.Project",
     method: "get",
@@ -235,14 +243,12 @@ async function waitForContainer(
   predicate: (container: ContainerState | null) => boolean,
   timeoutMs = CONTAINER_CONTROL_TIMEOUT_MS
 ): Promise<ContainerState | null> {
-  const deadline = Date.now() + timeoutMs;
-  let last: ContainerState | null = null;
-  while (Date.now() < deadline) {
-    last = await findContainer(dsm, name);
-    if (predicate(last)) return last;
-    await sleep(CONTAINER_POLL_MS);
-  }
-  return last;
+  return poll({
+    read: () => findContainer(dsm, name),
+    done: predicate,
+    intervalMs: CONTAINER_POLL_MS,
+    timeoutMs,
+  });
 }
 
 async function containerMutation(
@@ -266,7 +272,7 @@ async function containerMutation(
 }
 
 export async function nasContainerControl(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { name: string; action: "start" | "stop" }
 ) {
@@ -301,7 +307,7 @@ export async function nasContainerControl(
 }
 
 export async function nasContainerRemove(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { name: string }
 ) {
@@ -368,22 +374,21 @@ function projectReady(project: ProjectState): boolean {
 
 async function waitForProject(
   dsm: SynoClient,
-  project: string,
+  projectId: string,
+  summary: ProjectSummaryWire,
   predicate: (state: ProjectState) => boolean,
   timeoutMs: number
 ): Promise<ProjectState> {
-  const deadline = Date.now() + timeoutMs;
-  let last = await nasContainerProjectInfo(dsm, project);
-  while (Date.now() < deadline) {
-    if (predicate(last)) return last;
-    await sleep(PROJECT_POLL_MS);
-    last = await nasContainerProjectInfo(dsm, project);
-  }
-  return last;
+  return poll({
+    read: () => projectInfoById(dsm, projectId, summary),
+    done: predicate,
+    intervalMs: PROJECT_POLL_MS,
+    timeoutMs,
+  });
 }
 
 function ambiguousProjectError(err: unknown): boolean {
-  if (err instanceof DsmError) return err.code === 1202;
+  if (err instanceof SynologyApiError) return err.code === 1202;
   return isSoftTransportError(err);
 }
 
@@ -408,7 +413,7 @@ async function projectMutation(
 }
 
 export async function nasContainerProjectDeploy(
-  cfg: Config,
+  cfg: RuntimeConfig,
   dsm: SynoClient,
   args: { project: string; file: string }
 ) {
@@ -416,7 +421,7 @@ export async function nasContainerProjectDeploy(
   if (content.trim().length === 0) throw new Error(`Compose file "${args.file}" is empty.`);
   const composeSha256 = createHash("sha256").update(content).digest("hex");
   const resolved = await resolveProject(dsm, args.project);
-  const before = await nasContainerProjectInfo(dsm, resolved.id);
+  const before = await projectInfoById(dsm, resolved.id, resolved.summary);
   const failure = `Project "${before.name}" did not reach a ready state after build.`;
 
   const { after, ok } = await withAudit(
@@ -433,6 +438,7 @@ export async function nasContainerProjectDeploy(
         const stopped = await waitForProject(
           dsm,
           resolved.id,
+          resolved.summary,
           (state) => !(state.containers ?? []).some((container) => container.running),
           PROJECT_STOP_TIMEOUT_MS
         );
@@ -456,6 +462,7 @@ export async function nasContainerProjectDeploy(
       const state = await waitForProject(
         dsm,
         resolved.id,
+        resolved.summary,
         projectReady,
         PROJECT_BUILD_TIMEOUT_MS
       );

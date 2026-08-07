@@ -2,13 +2,8 @@
  * Thin Synology Web API client (`SynoClient`). Handles login (with TOTP), SID
  * caching, and automatic re-auth on 119 ("SID not found").
  *
- * One client serves both targets: the DSM NAS and the SRM router speak the same
- * SYNO.* Web API, so "DSM vs SRM" is expressed as Config (base URL, auth path /
- * version, session) plus construction options (read-only, cred loader) — not as a
- * second client class. The wire shapes it exchanges keep the `Dsm*` prefix
- * (`DsmResponse`, `DsmError`, `DsmCallOptions`): "DSM Web API" is Synology's name
- * for the protocol *both* devices implement, so `Dsm*` names the protocol while
- * `SynoClient` names the connection.
+ * DSM and SRM use the same client. Authentication and policy differences are
+ * fields on TargetConfig, not branches or subclasses here.
  *
  * Reference: Synology DSM Login Web API Guide; SYNO.API.* family endpoints.
  * We hit `entry.cgi` for almost everything (the unified DSM dispatcher).
@@ -18,13 +13,11 @@
  * We do not paper over that here.
  */
 
-import type { Config, TargetConfig } from "./config.js";
-import { routerTargetFrom } from "./config.js";
+import type { TargetConfig } from "./config.js";
 import {
   currentTotpCode,
-  loadCredentials,
-  loadDsmOnlyCredentials,
-  type DsmOnlyCredentials,
+  loadSynologyCredentials,
+  type SynologyCredentials,
 } from "./auth.js";
 import {
   SID_TTL_MS,
@@ -40,20 +33,19 @@ import {
 // Bound every GET read (writes/POST are exempt — see callOnce). A target reachable
 // at the TCP layer but unresponsive at the application layer (a wedged SRM web
 // service, a stalled TLS handshake) would otherwise hang on undici's multi-minute
-// default — and because the digest awaits all sources, one such router would
-// withhold the whole result past the MCP client's ~300s drop, defeating the "one
-// device down never aborts the rest" guarantee. Reads return in seconds, so 30s is
-// generous; on timeout fetch rejects (AbortError, not a DsmError) and the caller's
+// default. Because the digest awaits all sources, one such router would withhold
+// the whole result. Reads return in seconds, so 30s is
+// generous; on timeout fetch rejects (AbortError, not a SynologyApiError) and the caller's
 // catch / runSource surfaces it.
 const REQUEST_TIMEOUT_MS = 30_000;
 
-export interface DsmResponse<T = any> {
+export interface SynologyApiResponse<T = any> {
   success: boolean;
   data?: T;
   error?: { code: number; errors?: any[] };
 }
 
-export interface DsmCallOptions {
+export interface SynologyCallOptions {
   api: string;
   method: string;
   /** API version. Default: 1. */
@@ -99,7 +91,7 @@ const READ_METHODS = new Set([
   "status",
 ]);
 
-export function dsmMethodMayMutate(method: string): boolean {
+export function methodMayMutate(method: string): boolean {
   return !READ_METHODS.has(method);
 }
 
@@ -107,14 +99,14 @@ export function dsmMethodMayMutate(method: string): boolean {
  *  reverse-engineered, so this is a small curated subset — see
  *  docs/dsm-api-quirks.md for the broader catalog. Only codes referenced in
  *  code belong here; document-only codes live in the quirks doc. */
-export const DSM_ERR = {
+export const API_ERROR = {
   /** Session ID missing on a request that requires auth. Re-login + retry. */
   SID_NOT_FOUND: 117,
   /** Session ID expired or invalidated server-side. Re-login + retry. */
   SID_EXPIRED: 119,
 } as const;
 
-export class DsmError extends Error {
+export class SynologyApiError extends Error {
   constructor(
     public readonly api: string,
     public readonly method: string,
@@ -123,39 +115,33 @@ export class DsmError extends Error {
     message: string
   ) {
     super(message);
-    this.name = "DsmError";
+    this.name = "SynologyApiError";
   }
 }
 
 /** A state-changing request may complete on DSM after its connection drops.
  * A DSM response, including an error, makes the outcome known. */
 export function isSoftTransportError(err: unknown): boolean {
-  if (err instanceof DsmError) return false;
+  if (err instanceof SynologyApiError) return false;
   const message = String((err as { message?: string } | null)?.message ?? err);
   return /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(message);
 }
 
 export interface SynoClientOptions {
-  /** Refuse any mutating call (POST or non-read method). Used by the router
-   *  client, which authenticates as a dedicated SRM admin — read-only is
-   *  enforced here so a stray write can't leave the process. */
-  readOnly?: boolean;
-  /** Override how login secrets are fetched. The router passes the bearer-free
-   *  loader; default is the MCP's own `loadCredentials`. */
-  credLoader?: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
+  /** Override how login secrets are fetched. */
+  credLoader?: (cfg: TargetConfig) => Promise<SynologyCredentials>;
   /** Print each API request and successful response to stderr. */
   verbose?: boolean;
 }
 
 export class SynoClient {
-  private creds: DsmOnlyCredentials | null = null;
+  private creds: SynologyCredentials | null = null;
   private sid: string | null = null;
   private sidObtainedAt = 0;
-  private readonly readOnly: boolean;
-  private readonly credLoader: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
+  private readonly credLoader: (cfg: TargetConfig) => Promise<SynologyCredentials>;
   private readonly verbose: boolean;
   // Concurrent ensureSession() calls share the in-flight login. Without this,
-  // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
+  // a Promise.all of API calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
   private loginInFlight: Promise<void> | null = null;
   // A SID we saw rejected with 117/119. Remembered so the shared session file
@@ -163,8 +149,8 @@ export class SynoClient {
   private rejectedSid: string | null = null;
 
   constructor(private cfg: TargetConfig, opts: SynoClientOptions = {}) {
-    this.readOnly = opts.readOnly ?? false;
-    this.credLoader = opts.credLoader ?? loadCredentials;
+    this.credLoader =
+      opts.credLoader ?? ((target) => loadSynologyCredentials(target.envPrefix));
     this.verbose = opts.verbose ?? false;
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
@@ -252,18 +238,21 @@ export class SynoClient {
       method: "GET",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    const body = (await res.json()) as DsmResponse<{ sid: string }>;
+    const body = (await res.json()) as SynologyApiResponse<{ sid: string }>;
     if (!body.success || !body.data?.sid) {
       const code = body.error?.code ?? -1;
       // Surface the full auth error payload (matches callOnce's data-call logging);
       // login failures are otherwise opaque (just a code) and hard to diagnose.
-      console.error(`[dsm] login ✗ code=${code}`, JSON.stringify(body.error ?? {}));
-      throw new DsmError(
+      console.error(
+        `[syno:${this.cfg.platform}] login ✗ code=${code}`,
+        JSON.stringify(body.error ?? {})
+      );
+      throw new SynologyApiError(
         "SYNO.API.Auth",
         "login",
         code,
         body.error?.errors,
-        `DSM login failed (code ${code}). Confirm the DSM user exists, has 2FA on, and that the password + TOTP seed (env / *_FILE) are correct.`
+        `${this.cfg.platform.toUpperCase()} login failed (code ${code}). Confirm the user exists, has 2FA on, and that the password and TOTP seed are correct.`
       );
     }
     this.sid = body.data.sid;
@@ -285,8 +274,8 @@ export class SynoClient {
    * Call any DSM API method. Auto-handles SID expiry by re-logging in once on
    * codes 117 or 119 and retrying.
    */
-  async call<T = any>(opts: DsmCallOptions): Promise<T> {
-    if (this.readOnly && (opts.post || dsmMethodMayMutate(opts.method))) {
+  async call<T = any>(opts: SynologyCallOptions): Promise<T> {
+    if (this.cfg.readOnly && (opts.post || methodMayMutate(opts.method))) {
       throw new Error(
         `Read-only SynoClient refused ${opts.api}.${opts.method}` +
           `${opts.post ? " (POST)" : ""} — this client is restricted to read methods.`
@@ -298,8 +287,8 @@ export class SynoClient {
       return await this.callOnce<T>(opts);
     } catch (err) {
       if (
-        err instanceof DsmError &&
-        (err.code === DSM_ERR.SID_EXPIRED || err.code === DSM_ERR.SID_NOT_FOUND)
+        err instanceof SynologyApiError &&
+        (err.code === API_ERROR.SID_EXPIRED || err.code === API_ERROR.SID_NOT_FOUND)
       ) {
         // Only invalidate if a concurrent caller hasn't already refreshed the SID.
         // Under the digest's parallel fan-out, a straggler that 119s *after* the
@@ -317,7 +306,7 @@ export class SynoClient {
     }
   }
 
-  private async callOnce<T>(opts: DsmCallOptions): Promise<T> {
+  private async callOnce<T>(opts: SynologyCallOptions): Promise<T> {
     const url = new URL(`${this.cfg.baseUrl}/webapi/entry.cgi`);
     const body = new URLSearchParams();
     const add = (k: string, v: string | number | boolean | undefined) => {
@@ -342,7 +331,10 @@ export class SynoClient {
         safeParams[k] = isSensitiveParamKey(k) ? "***" : v;
       });
       const verb = opts.post ? "POST" : "GET";
-      console.error(`[dsm] → ${verb} ${opts.api}.${opts.method}`, safeParams);
+      console.error(
+        `[syno:${this.cfg.platform}] → ${verb} ${opts.api}.${opts.method}`,
+        safeParams
+      );
     }
 
     const headers: Record<string, string> = {};
@@ -356,19 +348,19 @@ export class SynoClient {
       ? { method: "POST", headers, body: body.toString() }
       : { method: "GET", headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
     const res = await fetch(url, init);
-    const json = (await res.json()) as DsmResponse<T>;
+    const json = (await res.json()) as SynologyApiResponse<T>;
     if (!json.success) {
       const code = json.error?.code ?? -1;
       const errs = json.error?.errors;
       // Log the whole raw error payload — most DSM failure modes only make
       // sense when you can see the full response, not just the code.
       console.error(
-        `[dsm] ✗ ${opts.api}.${opts.method} code=${code}`,
+        `[syno:${this.cfg.platform}] ✗ ${opts.api}.${opts.method} code=${code}`,
         opts.sensitiveResponse ? JSON.stringify({ code }) : JSON.stringify(json.error ?? {})
       );
       const safeErrors = opts.sensitiveResponse ? undefined : errs;
       const detail = safeErrors ? ` — ${JSON.stringify(safeErrors)}` : "";
-      throw new DsmError(
+      throw new SynologyApiError(
         opts.api,
         opts.method,
         code,
@@ -380,30 +372,11 @@ export class SynoClient {
       if (process.env.DEBUG_DSM_RESPONSES === "1" && !opts.sensitiveResponse) {
         const blob = JSON.stringify(json.data ?? {});
         const trimmed = blob.length > 1500 ? blob.slice(0, 1500) + "…" : blob;
-        console.error(`[dsm] ✓ ${opts.api}.${opts.method}`, trimmed);
+        console.error(`[syno:${this.cfg.platform}] ✓ ${opts.api}.${opts.method}`, trimmed);
       } else {
-        console.error(`[dsm] ✓ ${opts.api}.${opts.method}`);
+        console.error(`[syno:${this.cfg.platform}] ✓ ${opts.api}.${opts.method}`);
       }
     }
     return (json.data ?? ({} as T));
   }
-
-  hasSession(): boolean {
-    return !!this.sid;
-  }
-}
-
-/** Build the router (SRM) client from a Config, or null when no router target is
- *  configured. Always read-only and bearer-free — the single place that wiring
- *  lives, so the daemon and the CLI can't drift. */
-export function makeRouterClient(
-  cfg: Config,
-  opts: Pick<SynoClientOptions, "verbose"> = {}
-): SynoClient | null {
-  if (!cfg.router) return null;
-  return new SynoClient(routerTargetFrom(cfg), {
-    readOnly: true,
-    credLoader: () => loadDsmOnlyCredentials("SRM"),
-    ...opts,
-  });
 }

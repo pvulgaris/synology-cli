@@ -1,10 +1,9 @@
 /**
  * Session-store tests.
  *
- * These cover the machinery that replaced the daemon's in-memory SID. The
- * failure modes are all concurrency-shaped and none of them announce themselves
- * — a broken lock just means an occasional DSM error 404 that looks like a bad
- * password — so they are pinned here rather than left to live testing.
+ * The failure modes are concurrency-shaped and do not announce themselves. A
+ * broken lock causes an occasional API error 404 that looks like a bad password,
+ * so these cases need deterministic tests rather than live testing.
  */
 
 import { test } from "node:test";

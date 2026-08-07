@@ -2,18 +2,16 @@
  * Append-only JSONL audit log for every write call. One file per month at
  * `<auditLogDir>/YYYY-MM.jsonl`. Reads are not logged.
  *
- * Records are appended to disk at <auditLogDir>/<month>.jsonl. In the production
- * daemon that directory is bind-mounted to /volume1 on the NAS; in local dev it
- * defaults to a per-user cache dir (dev writes are test writes and stay out of
- * the NAS's canonical trail).
+ * Records are appended to disk at <auditLogDir>/<month>.jsonl. The default is
+ * per-user state outside the repository.
  *
  * The log is the safety net for the "writes always prompt" policy: it gives the
- * user a paper trail of what Claude did, even if a confirmation slipped through.
+ * user a record of what an agent changed, even if a confirmation slipped through.
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Config } from "./config.js";
+import type { RuntimeConfig } from "./config.js";
 
 export interface AuditRecord {
   ts: string;
@@ -31,7 +29,7 @@ export interface AuditRecord {
  *  body throws halfway through. Returns the body's `{after, ok}` so the
  *  caller can construct its tool-specific response shape. */
 export async function withAudit(
-  cfg: Config,
+  cfg: RuntimeConfig,
   opts: {
     tool: string;
     args: Record<string, unknown>;
@@ -65,7 +63,7 @@ export async function withAudit(
 }
 
 async function writeRecordToFile(
-  cfg: Config,
+  cfg: RuntimeConfig,
   rec: AuditRecord
 ): Promise<void> {
   const month = rec.ts.slice(0, 7); // YYYY-MM
@@ -75,7 +73,7 @@ async function writeRecordToFile(
 }
 
 async function recordWrite(
-  cfg: Config,
+  cfg: RuntimeConfig,
   rec: Omit<AuditRecord, "ts">
 ): Promise<void> {
   const ts = new Date().toISOString();

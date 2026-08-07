@@ -7,7 +7,8 @@
  * "SMTP fine, just verify-cert is off."
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
+import { readSource, readWarnings } from "./partial.js";
 
 export async function nasNotifications(dsm: SynoClient) {
   // DSM 7.3 exposes recipients only at Mail.Conf v2 (a `profiles` list —
@@ -17,7 +18,9 @@ export async function nasNotifications(dsm: SynoClient) {
   // call — otherwise a v2-unsupported error would null the whole block and
   // drop the SMTP fields too, a regression from the always-worked v1 call.
   const getMailConf = (version: number) =>
-    dsm.call({ api: "SYNO.Core.Notification.Mail.Conf", method: "get", version }).catch(() => null);
+    readSource(`mail_config_v${version}`, () =>
+      dsm.call({ api: "SYNO.Core.Notification.Mail.Conf", method: "get", version })
+    );
   // Only accept a v2 payload that actually carries config — some DSM builds
   // answer an unknown version with a bare `success`/`{}` rather than an error,
   // and that truthy `{}` must not shadow the v1 fallback (which would drop the
@@ -25,7 +28,8 @@ export async function nasNotifications(dsm: SynoClient) {
   const usable = (m: { enable_mail?: unknown; profiles?: unknown } | null) =>
     !!m && (m.enable_mail !== undefined || Array.isArray(m.profiles));
   const v2 = await getMailConf(2);
-  const mail = usable(v2) ? v2 : await getMailConf(1);
+  const selected = usable(v2.value) ? v2 : await getMailConf(1);
+  const mail = selected.value;
   // Recipients live in `profiles` on DSM 7.3 (target_type "mail"), in the flat
   // `mail` array pre-7.3. Prefer the authoritative address `target_config.mail`
   // over the `target_name` display label (a profile can be named "Home Alert");
@@ -63,5 +67,6 @@ export async function nasNotifications(dsm: SynoClient) {
           in_use: mail.in_use ?? null,
         }
       : null,
+    warnings: mail ? [] : readWarnings([v2, selected]),
   };
 }

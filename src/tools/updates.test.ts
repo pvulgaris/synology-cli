@@ -11,7 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DsmError, type SynoClient, type DsmCallOptions } from "../dsm.js";
+import type { SynoClient, SynologyCallOptions } from "../client.js";
 import { mapOsUpdate } from "../types.js";
 import { synologyUpdateDigest } from "./updates.js";
 
@@ -19,19 +19,13 @@ import { synologyUpdateDigest } from "./updates.js";
  *  `call` reject (simulating a DSM error / device down); a missing key throws an
  *  explicit "unexpected" so a drifting call shape fails loud, not silently. */
 function fakeClient(handlers: Record<string, (params: Record<string, unknown>) => unknown>): SynoClient {
-  const call = async (opts: DsmCallOptions): Promise<unknown> => {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
     const key = `${opts.api}.${opts.method}`;
     const h = handlers[key];
     if (!h) throw new Error(`unexpected DSM call: ${key}`);
     return h((opts.params ?? {}) as Record<string, unknown>);
   };
   return { call } as unknown as SynoClient;
-}
-
-/** A DsmError as SynoClient.callOnce throws it — the type the router's catch keys
- *  on (only 102/103/104 degrade to a note; outages/auth errors propagate). */
-function dsmErr(code: number, api = "SYNO.Core.Package.Server", method = "list"): DsmError {
-  return new DsmError(api, method, code, undefined, `${api}.${method} failed (code ${code})`);
 }
 
 // ── mapOsUpdate ─────────────────────────────────────────────────────────────
@@ -127,9 +121,6 @@ test("digest: four sources assemble; a real SRM OS update lands in pending", { t
   const router = fakeClient({
     "SYNO.Core.System.info": () => ({ firmware_ver: "SRM 1.3.1-9346 Update 13" }),
     "SYNO.Core.Upgrade.Server.check": () => ({ available: true, version: "SRM 1.3.2-9366" }),
-    // SRM has no package-update API → this 103s live; graceful degrade to a note.
-    "SYNO.Core.Package.Server.list": () => { throw dsmErr(103); },
-    "SYNO.Core.Package.list": () => ({ packages: [] }),
   });
 
   const d = await synologyUpdateDigest(cleanNas(), router);
@@ -161,9 +152,6 @@ test("digest: one device down ⇒ that source ok:false, others still report", { 
   const router = fakeClient({
     "SYNO.Core.System.info": () => { throw new Error("router unreachable"); },
     "SYNO.Core.Upgrade.Server.check": () => { throw new Error("DSM login failed (code 404)"); },
-    // A real outage (not a 103 capability gap) must surface as ok:false, not the note.
-    "SYNO.Core.Package.Server.list": () => { throw new Error("router unreachable"); },
-    "SYNO.Core.Package.list": () => { throw new Error("router unreachable"); },
   });
 
   const d = await synologyUpdateDigest(cleanNas(), router);
@@ -172,7 +160,7 @@ test("digest: one device down ⇒ that source ok:false, others still report", { 
   const byName = Object.fromEntries(d.sources.map((s) => [s.source, s]));
   assert.equal(byName.router_os.ok, false);
   assert.match(byName.router_os.error ?? "", /404/);
-  assert.equal(byName.router_packages.ok, false); // outage propagates, not masked
+  assert.equal(byName.router_packages.ok, true); // static capability, no failed probe
   // The NAS sources are unaffected — one device down doesn't abort the rest.
   assert.equal(byName.nas_os.ok, true);
   assert.equal(byName.nas_packages.ok, true);

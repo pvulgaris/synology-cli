@@ -19,7 +19,7 @@
  *   snapshot-schedule config is not exposed by this API.
  */
 
-import { DsmError, type SynoClient } from "../dsm.js";
+import { SynologyApiError, type SynoClient } from "../client.js";
 
 // Synology C2 reports target_type "cloud_image" AND transfer_type "synocloud_swift"
 // (confirmed live). Requiring both avoids over-flagging any other cloud-image target.
@@ -63,7 +63,7 @@ export async function nasHyperbackupTasks(dsm: SynoClient) {
   try {
     list = await dsm.call({ api: "SYNO.Backup.Task", method: "list", version: 1 });
   } catch (err) {
-    if (err instanceof DsmError && [102, 103].includes(err.code)) {
+    if (err instanceof SynologyApiError && [102, 103].includes(err.code)) {
       return { tasks: [], note: "Hyper Backup is not installed (SYNO.Backup.Task API absent)." };
     }
     throw err;

@@ -1,9 +1,7 @@
 /**
- * Cross-process DSM session store.
+ * Cross-process Synology session store.
  *
- * The daemon kept one SID in memory for its lifetime, so persisting it was a dev
- * convenience. A CLI is a fresh process per invocation, which turns two latent
- * problems into everyday ones:
+ * A CLI is a fresh process per invocation, which creates two problems:
  *
  *   1. Every invocation would log in. Beyond being slow (a login is a round-trip
  *      plus an `op`/file credential read), DSM rejects a second login reusing the
@@ -12,10 +10,9 @@
  *   2. Nothing coordinates concurrent invocations. `syno status & syno shares list &`
  *      both miss the cache, both log in, and DSM 404s whichever loses the race.
  *
- * So the SID cache is promoted from best-effort to load-bearing, and gets the two
- * things it was missing: an exclusive lock so only one process logs in at a time,
- * and a record of which TOTP window produced the SID so a genuinely-needed second
- * login waits for the next code rather than burning the current one.
+ * The SID cache uses an exclusive lock so only one process logs in at a time. It
+ * also records which TOTP window produced the SID so a required second login
+ * waits for the next code rather than reusing the current one.
  */
 
 import {
@@ -42,7 +39,7 @@ export const SID_TTL_MS = 10 * 60 * 1000;
 /**
  * Longest a healthy holder can legitimately hold the lock: it may wait out a
  * full TOTP window (up to TOTP_WINDOW_MS) AND then make a login request that can
- * take up to the client's request timeout. The request timeout lives in dsm.ts;
+ * take up to the client's request timeout. The request timeout lives in client.ts;
  * duplicating its value here rather than importing keeps session.ts free of a
  * dependency on the client, at the cost of a comment that must track it (30s).
  */
@@ -165,14 +162,6 @@ export function writeSession(path: string, rec: SessionRecord): void {
     renameSync(tmp, path);
   } catch {
     // Best-effort. A failed write costs a login next invocation, not correctness.
-  }
-}
-
-export function clearSession(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch {
-    // already gone
   }
 }
 

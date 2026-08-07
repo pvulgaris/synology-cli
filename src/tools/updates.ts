@@ -15,7 +15,7 @@
  * parses defensively so minor shape drift degrades to `available:false` not a throw.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
 import type {
   ComponentUpdate,
   OsUpdateStatus,
@@ -24,7 +24,7 @@ import type {
 } from "../types.js";
 import { nasPackagesCheckUpdates } from "./packages.js";
 import { osCheckUpdate } from "./os-check.js";
-import { routerPackagesCheckUpdates, routerSrmOsCheckUpdate } from "./router.js";
+import { routerSrmOsCheckUpdate } from "./srm.js";
 
 /** DSM OS-update check. Reads the current version from `SYNO.Core.System info`
  *  at **v3** (DSM-only; SRM caps at v1) — the single device-specific knob the
@@ -55,10 +55,7 @@ function osToUpdates(
   ];
 }
 
-// Accepts the loose shape from nasPackagesCheckUpdates (Record<string,unknown>[])
-// and the typed router pending list alike; coerces to ComponentUpdate.
 function pkgToUpdates(
-  device: "nas" | "router",
   pending: ReadonlyArray<Record<string, unknown>>
 ): ComponentUpdate[] {
   return pending
@@ -66,7 +63,7 @@ function pkgToUpdates(
     // than coercing undefined into the literal string "undefined" in the digest.
     .filter((p) => p.available_version != null && p.available_version !== "")
     .map((p) => ({
-      device,
+      device: "nas",
       component: "package" as const,
       id: String(p.id),
       name: String(p.name),
@@ -93,28 +90,34 @@ async function runSource(
 }
 
 export async function synologyUpdateDigest(
-  dsm: SynoClient,
+  dsm: SynoClient | null,
   router: SynoClient | null
 ): Promise<UpdateDigest> {
-  const tasks: Promise<SourceResult>[] = [
-    runSource("nas_os", async () => {
-      const st = await nasDsmOsCheckUpdate(dsm);
-      return { updates: osToUpdates("nas", "DSM", "DSM", st), note: st.warning };
-    }),
-    runSource("nas_packages", async () => ({
-      updates: pkgToUpdates("nas", (await nasPackagesCheckUpdates(dsm)).pending),
-    })),
-  ];
+  const tasks: Promise<SourceResult>[] = [];
+  if (dsm) {
+    tasks.push(
+      runSource("nas_os", async () => {
+        const st = await nasDsmOsCheckUpdate(dsm);
+        return { updates: osToUpdates("nas", "DSM", "DSM", st), note: st.warning };
+      }),
+      runSource("nas_packages", async () => ({
+        updates: pkgToUpdates((await nasPackagesCheckUpdates(dsm)).pending),
+      }))
+    );
+  } else {
+    const notConfigured = async () => ({ updates: [], note: "DSM target not configured" });
+    tasks.push(runSource("nas_os", notConfigured), runSource("nas_packages", notConfigured));
+  }
   if (router) {
     tasks.push(
       runSource("router_os", async () => {
         const st = await routerSrmOsCheckUpdate(router);
         return { updates: osToUpdates("router", "SRM", "SRM (router)", st), note: st.warning };
       }),
-      runSource("router_packages", async () => {
-        const { pending, note } = await routerPackagesCheckUpdates(router);
-        return { updates: pkgToUpdates("router", pending), note };
-      })
+      runSource("router_packages", async () => ({
+        updates: [],
+        note: "SRM exposes no package-update API; router OS updates are covered separately.",
+      }))
     );
   } else {
     // Route the absent-router sources through the same runSource path as the rest

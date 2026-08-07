@@ -9,13 +9,13 @@
  * it at v3, SRM only at v1 (v3 104s on the router). That's the single parameter;
  * the thin nasDsmOsCheckUpdate / routerSrmOsCheckUpdate wrappers each bind it.
  *
- * Lives in its own module (not updates.ts) because updates.ts imports router.ts
+ * Lives in its own module because updates.ts imports srm.ts
  * for the digest — a shared helper there would close an updates↔router import
  * cycle. System.info is read defensively (.catch) so a failed current-version
  * read degrades to a warning on the result rather than failing the whole check.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
 import { mapOsUpdate, type OsUpdateStatus } from "../types.js";
 
 export async function osCheckUpdate(

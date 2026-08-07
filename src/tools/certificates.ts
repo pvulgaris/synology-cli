@@ -6,7 +6,7 @@
  * threshold "warn at 30 days" without parsing the date itself.
  */
 
-import type { SynoClient } from "../dsm.js";
+import type { SynoClient } from "../client.js";
 
 function daysUntil(validTill: unknown): number | null {
   if (typeof validTill !== "string") return null;

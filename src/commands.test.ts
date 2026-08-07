@@ -1,10 +1,9 @@
 /**
  * Command-surface tests: argv parsing, command resolution, and the write gate.
  *
- * The write gate is the one that matters most. Under MCP the client prompted
- * before invoking a write tool; here nothing does, so if `requiresConfirmation`
- * silently stops covering a command, an agent can uninstall a package with no
- * confirmation and nothing surfaces the regression.
+ * The write gate is the one that matters most. The CLI does not prompt, so if
+ * `requiresConfirmation` stops covering a command, an agent can uninstall a
+ * package with no confirmation.
  */
 
 import { test } from "node:test";
@@ -17,13 +16,14 @@ import {
   COMMANDS,
   UsageError,
   parseArgv,
-  redactSecrets,
   requiresConfirmation,
   resolveCommand,
+  selectPlatform,
+  validateInvocation,
   type Command,
   type CommandContext,
 } from "./commands.js";
-import { dsmMethodMayMutate } from "./dsm.js";
+import { methodMayMutate } from "./client.js";
 
 const cmd = (name: string): Command => {
   const c = COMMANDS.find((x) => x.name === name);
@@ -35,9 +35,11 @@ const cmd = (name: string): Command => {
 function ctx(over: Partial<CommandContext> & { auditDir?: string }): CommandContext {
   const auditLogDir = over.auditDir ?? mkdtempSync(join(tmpdir(), "syno-audit-"));
   return {
-    cfg: { auditLogDir } as any,
-    dsm: over.dsm ?? ({ call: async () => ({ ok: true }) } as any),
-    router: over.router ?? null,
+    runtime: { auditLogDir, tlsSkipVerify: false },
+    target:
+      over.target ??
+      ({ platform: "dsm", baseUrl: "https://nas.test", user: "agent" } as any),
+    client: over.client ?? ({ call: async () => ({ ok: true }) } as any),
     args: over.args ?? [],
     flags: over.flags ?? {},
   };
@@ -155,8 +157,8 @@ test("gate: raw mutating methods require confirmation even when DSM uses GET", (
   const raw = byName("raw");
   assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Image", "delete"]), true);
   assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Project", "build"]), true);
-  assert.equal(dsmMethodMayMutate("get"), false);
-  assert.equal(dsmMethodMayMutate("unknown_future_method"), true);
+  assert.equal(methodMayMutate("get"), false);
+  assert.equal(methodMayMutate("unknown_future_method"), true);
 });
 
 test("gate: every command that can mutate DSM is either mutating or raw", () => {
@@ -183,15 +185,41 @@ test("registry: every command has a summary for --help", () => {
   }
 });
 
+test("validation: unknown flags and extra arguments are usage errors", () => {
+  assert.throws(() => validateInvocation(cmd("status"), [], { typo: true }), isUsage);
+  assert.throws(() => validateInvocation(cmd("status"), ["extra"], {}), isUsage);
+  assert.throws(
+    () => validateInvocation(cmd("containers projects deploy"), ["ha"], { yes: true }),
+    isUsage
+  );
+});
+
+test("validation: commands accept the global verbose flag", () => {
+  assert.doesNotThrow(() =>
+    validateInvocation(cmd("status"), [], { verbose: true })
+  );
+});
+
+test("validation: raw API versions must be complete integers", () => {
+  const raw = cmd("raw");
+  assert.throws(
+    () => validateInvocation(raw, ["SYNO.Core.System", "info"], { version: "3junk" }),
+    isUsage
+  );
+});
+
+test("target selection: single-platform commands infer their target", () => {
+  assert.equal(selectPlatform(cmd("router update-check"), {}), "srm");
+  assert.equal(selectPlatform(cmd("status"), {}), "dsm");
+  assert.equal(selectPlatform(cmd("raw"), { target: "srm" }), "srm");
+  assert.throws(() => selectPlatform(cmd("status"), { target: "srm" }), isUsage);
+});
+
 // ── usage errors ────────────────────────────────────────────────────────────
 
 // `run` throws synchronously; the async wrapper turns that into a rejection the
 // top-level catch in cli.ts sees as a UsageError → exit 2.
 const isUsage = (e: unknown) => e instanceof UsageError;
-
-test("usage: a missing required argument throws UsageError (→ exit 2)", async () => {
-  await assert.rejects(async () => cmd("packages info").run(ctx({ args: [] })), isUsage);
-});
 
 test("usage: an invalid control action throws UsageError", async () => {
   await assert.rejects(
@@ -207,29 +235,30 @@ test("usage: a malformed raw param throws UsageError", async () => {
   );
 });
 
-test("usage: project deploy requires --file=PATH", async () => {
-  await assert.rejects(
-    async () => cmd("containers projects deploy").run(ctx({ args: ["ha"] })),
-    isUsage
-  );
-});
-
-test("usage: container logs rejects a non-integer --limit", async () => {
-  await assert.rejects(
-    async () =>
-      cmd("containers logs").run(
-        ctx({ args: ["app"], flags: { limit: "many" } })
-      ),
-    isUsage
-  );
-});
-
 // ── raw audit ───────────────────────────────────────────────────────────────
 
 test("raw GET is a read and writes no audit record", async () => {
   const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
   await cmd("raw").run(ctx({ auditDir, args: ["SYNO.Core.System", "info"] }));
   assert.deepEqual(auditLines(auditDir), []);
+});
+
+test("raw --params-json encodes values for Synology's form parser", async () => {
+  let sent: Record<string, string> | undefined;
+  const client = {
+    call: async (opts: { params: Record<string, string> }) => {
+      sent = opts.params;
+      return {};
+    },
+  } as any;
+  await cmd("raw").run(
+    ctx({
+      client,
+      args: ["SYNO.Core.Share", "get"],
+      flags: { "params-json": '{"name":"docs","limit":5,"active":true}' },
+    })
+  );
+  assert.deepEqual(sent, { name: '"docs"', limit: "5", active: "true" });
 });
 
 test("raw GET-transport delete is audited as a write", async () => {
@@ -264,7 +293,7 @@ test("raw --post writes an audit record like a named write", async () => {
 test("raw --post returns its response but redacts it from the audit", async () => {
   const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
   const secret = "PASSWORD: do-not-audit";
-  const dsm = {
+  const client = {
     call: async (opts: { sensitiveResponse?: boolean }) => {
       assert.equal(opts.sensitiveResponse, true);
       return { result: { content: secret }, id: "x" };
@@ -273,7 +302,7 @@ test("raw --post returns its response but redacts it from the audit", async () =
   const out = await cmd("raw").run(
     ctx({
       auditDir,
-      dsm,
+      client,
       args: ["SYNO.Docker.Project", "update", "id=x", `content=${secret}`],
       flags: { post: true },
     })
@@ -283,27 +312,6 @@ test("raw --post returns its response but redacts it from the audit", async () =
   assert.doesNotMatch(line, /do-not-audit/);
   const rec = JSON.parse(line);
   assert.equal(rec.after.result.content, "***");
-});
-
-test("redactSecrets masks credential-shaped keys, keeps the rest", () => {
-  const r = redactSecrets({
-    passwd: "hunter2",
-    otp_code: "123456",
-    totp_secret: "SEED",
-    api_key: "k",
-    token: "t",
-    content: "services:\n  app:\n    environment:\n      PASSWORD: secret",
-    id: "SynologyDrive",
-    name: "x",
-  });
-  assert.equal(r.passwd, "***");
-  assert.equal(r.otp_code, "***");
-  assert.equal(r.totp_secret, "***");
-  assert.equal(r.api_key, "***");
-  assert.equal(r.token, "***");
-  assert.equal(r.content, "***");
-  assert.equal(r.id, "SynologyDrive"); // non-secret preserved
-  assert.equal(r.name, "x");
 });
 
 test("raw --post never writes a secret param value to the audit log", async () => {
