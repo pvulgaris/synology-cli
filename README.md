@@ -1,8 +1,8 @@
 # synology-cli
 
-`syno`, a command-line tool for a Synology NAS (DSM 7) and, optionally, an SRM router. Container Manager, packages, security audit, shares and snapshots, backups, storage health, and a raw escape hatch to any DSM Web API endpoint.
+`syno` is an agent-oriented command-line tool for Synology DSM and SRM devices. It provides curated commands for common operations and a target-aware `raw` escape hatch for the rest.
 
-Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the DSM API trace. Exit 0 on success, 1 on failure, 2 on a usage error.
+Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the Synology API trace. Exit 0 on success, 1 on failure, 2 on a usage error.
 
 ## Install
 
@@ -15,11 +15,11 @@ That puts `syno` on your `PATH`. Node 22 or newer.
 
 ## Configure
 
-Required:
+Configure DSM, SRM, or both. A command loads only the target it uses.
 
 | Env | Meaning |
 |---|---|
-| `DSM_BASE_URL` | e.g. `https://nas.local:5001` |
+| `DSM_BASE_URL` | DSM target, e.g. `https://nas.example.test:5001` |
 | `DSM_USER` | DSM account name (default `claude-mcp`) |
 | `DSM_PASSWORD` | account password |
 | `DSM_TOTP_SECRET` | TOTP seed for the account's 2FA |
@@ -28,56 +28,24 @@ The account must be in the `administrators` group. DSM 7 gates its admin APIs on
 
 Every secret also accepts a `*_FILE` form (`DSM_PASSWORD_FILE`, `DSM_TOTP_SECRET_FILE`) naming a file to read it from. Setting both forms of the same secret is refused. Symlinks are refused. How the value gets there is up to you: a 0600 file, a plain export, or a secret-manager launcher. There's no built-in secret-manager dependency.
 
-Optional:
+Configure SRM independently when needed. Process settings apply to both targets.
 
 | Env | Meaning |
 |---|---|
-| `SRM_BASE_URL` | e.g. `https://router.local:8001`. Presence alone enables the router commands. |
+| `SRM_BASE_URL` | SRM target, e.g. `https://router.example.test:8001`. |
 | `SRM_USER`, `SRM_PASSWORD`, `SRM_TOTP_SECRET` | router login (also `*_FILE`). Must be an SRM admin; usage is read-only. |
 | `AUDIT_LOG_DIR` | where write operations are logged. Default `~/.local/state/syno/audit/`. |
-| `TLS_REJECT_UNAUTHORIZED` | anything but `0` enforces cert validation. Defaults to skipping, since DSM ships a self-signed cert. |
+| `TLS_REJECT_UNAUTHORIZED` | anything but `0` enforces cert validation. Defaults to skipping for self-signed Synology certificates. |
 
-The DSM session is cached under `~/.local/state/syno/` so back-to-back invocations don't each burn a login and a 2FA code.
+`SRM_*` is independent of `DSM_*`. For example, `syno router update-check` and `syno raw --target=srm ...` work with no DSM configuration. SRM remains read-only.
+
+Each target's session is cached independently under `~/.local/state/syno/` so back-to-back invocations don't each burn a login and a 2FA code.
 
 ## Commands
 
-Writes are marked. `syno --help` prints the same list.
-
-| Command | What it does |
-|---|---|
-| `syno status` | model, DSM version, uptime, temperature, CPU/memory load |
-| `syno storage` | volumes (status, used/free, RAID level) and drives (S.M.A.R.T., temp, model) |
-| `syno shares list` | shared folders with encryption, quota, recycle bin, snapshot support |
-| `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
-| `syno shares snapshot-config <share>` | snapshot task config: schedule and Smart Recycle retention |
-| `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result |
-| `syno tasks list` | DSM Task Scheduler entries |
-| `syno containers list` | containers with image, state, health, exit code, and restart count |
-| `syno containers logs <name>` | recent logs in chronological order; `[--limit=N]` |
-| `syno containers control <name> <start\|stop>` | **write.** verified container lifecycle control |
-| `syno containers remove <name>` | **write.** remove a stopped container |
-| `syno containers projects list` | Compose projects with ids, status, and container counts |
-| `syno containers projects info <name-or-id>` | one project's normalized state; omits its Compose content |
-| `syno containers projects deploy <name-or-id> --file=PATH` | **write.** stop, update, build, and verify an existing project |
-| `syno containers images list` | local image inventory with repository, tags, id, and size |
-| `syno packages list` | installed packages with versions and running state |
-| `syno packages updates` | packages with pending updates from the Synology repo |
-| `syno packages info <name>` | publisher, description, changelog, dependencies, size |
-| `syno packages install <name>` | **write.** `[--version=X] [--accept-dependencies]` |
-| `syno packages update <name>` | **write.** update to the latest version |
-| `syno packages uninstall <name>` | **write.** requires `--keep-data`; data deletion isn't supported here |
-| `syno packages control <name> <start\|stop\|restart>` | **write.** idempotent, verified by status poll |
-| `syno security scan` | runs DSM Security Advisor and returns the failing rules |
-| `syno security settings` | web/TLS, SSH, SMB, NFS, auto-update, password policy, telemetry |
-| `syno security firewall` | firewall profiles, auto-block, per-adapter DoS protection |
-| `syno users list` | accounts: name, uid, 2FA state, expired flag, email |
-| `syno external` | QuickConnect, DDNS, App Portal, reverse proxy, port forwarding |
-| `syno notifications` | SMTP config: server, port, SSL, verify-cert, sender, recipient count |
-| `syno certificates` | certificates with derived `days_until_expiry` |
-| `syno updates` | pending updates across DSM OS, NAS packages, router OS, router packages |
-| `syno dsm update-check` | whether a DSM OS update is available (detect only) |
-| `syno router update-check` | whether an SRM router OS update is available (detect only) |
-| `syno raw <api> <method>` | any DSM endpoint. `[--version=N] [--post] [k=v ...]` |
+`syno --help` lists commands for people. `syno help --json` returns the same
+registry with arguments, flags, supported platforms, mutation status, and scope
+for agents. The registry is the command inventory; it is not duplicated here.
 
 ## Writes require `--yes`
 
@@ -97,15 +65,16 @@ Every write is appended to a monthly JSONL audit log with the before/after state
 
 ## `raw`
 
-For anything without a named command:
+For anything without a named command, select DSM by default or SRM explicitly:
 
 ```sh
 syno raw SYNO.Core.Share get --version=1 name='"docs"'
+syno raw SYNO.Core.System info --target=srm --params-json='{}'
 ```
 
-Params are form-encoded and DSM JSON-parses each value, so string params need their quotes on the wire. Bools and numbers are literal; arrays and objects are JSON-stringified. Use `--` to stop flag parsing when a DSM param name collides with a CLI flag.
+`--params-json` handles Synology's wire quoting for strings, booleans, numbers, arrays, and objects. The trailing `k=v` form remains available for direct wire values. Do not combine the two forms.
 
-`raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. DSM has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary.
+`raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. Synology has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary. SRM's target policy refuses every mutation even with `--yes`.
 
 See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, response shapes, and known API names.
 
