@@ -23,6 +23,7 @@ import {
   type Command,
   type CommandContext,
 } from "./commands.js";
+import { dsmMethodMayMutate } from "./dsm.js";
 
 const cmd = (name: string): Command => {
   const c = COMMANDS.find((x) => x.name === name);
@@ -92,6 +93,12 @@ test("resolve: matches a two-word command and returns the leftovers", () => {
   assert.deepEqual(r?.args, ["HyperBackup"]);
 });
 
+test("resolve: longest container command path wins", () => {
+  const r = resolveCommand(["containers", "projects", "deploy", "ha"]);
+  assert.equal(r?.command.name, "containers projects deploy");
+  assert.deepEqual(r?.args, ["ha"]);
+});
+
 test("resolve: matches a one-word command", () => {
   assert.equal(resolveCommand(["status"])?.command.name, "status");
 });
@@ -138,15 +145,24 @@ test("gate: read commands are free to invoke", () => {
   }
 });
 
-test("gate: raw is free on GET but gated on --post", () => {
+test("gate: raw read methods are free but POST is gated", () => {
   const raw = byName("raw");
-  assert.equal(requiresConfirmation(raw, {}), false);
+  assert.equal(requiresConfirmation(raw, {}, ["SYNO.Core.Share", "list"]), false);
   assert.equal(requiresConfirmation(raw, { post: true }), true);
+});
+
+test("gate: raw mutating methods require confirmation even when DSM uses GET", () => {
+  const raw = byName("raw");
+  assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Image", "delete"]), true);
+  assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Project", "build"]), true);
+  assert.equal(dsmMethodMayMutate("get"), false);
+  assert.equal(dsmMethodMayMutate("unknown_future_method"), true);
 });
 
 test("gate: every command that can mutate DSM is either mutating or raw", () => {
   // Encodes the rule the registry must keep: a command reaching a DSM write has
-  // to be declared mutating. `raw` is the sanctioned exception, gated by --post.
+  // to be declared mutating. `raw` is the sanctioned exception, gated by POST
+  // or by a method outside its read allowlist.
   const writeish = COMMANDS.filter((c) =>
     /install|uninstall|update |control/.test(`${c.name} `)
   );
@@ -191,12 +207,42 @@ test("usage: a malformed raw param throws UsageError", async () => {
   );
 });
 
+test("usage: project deploy requires --file=PATH", async () => {
+  await assert.rejects(
+    async () => cmd("containers projects deploy").run(ctx({ args: ["ha"] })),
+    isUsage
+  );
+});
+
+test("usage: container logs rejects a non-integer --limit", async () => {
+  await assert.rejects(
+    async () =>
+      cmd("containers logs").run(
+        ctx({ args: ["app"], flags: { limit: "many" } })
+      ),
+    isUsage
+  );
+});
+
 // ── raw audit ───────────────────────────────────────────────────────────────
 
 test("raw GET is a read and writes no audit record", async () => {
   const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
   await cmd("raw").run(ctx({ auditDir, args: ["SYNO.Core.System", "info"] }));
   assert.deepEqual(auditLines(auditDir), []);
+});
+
+test("raw GET-transport delete is audited as a write", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  await cmd("raw").run(
+    ctx({
+      auditDir,
+      args: ["SYNO.Docker.Image", "delete", "name=app", "tag=old"],
+    })
+  );
+  const rec = JSON.parse(auditLines(auditDir)[0]);
+  assert.equal(rec.tool, "raw:SYNO.Docker.Image.delete");
+  assert.equal(rec.ok, true);
 });
 
 test("raw --post writes an audit record like a named write", async () => {
@@ -215,12 +261,28 @@ test("raw --post writes an audit record like a named write", async () => {
   assert.equal(rec.ok, true);
 });
 
-test("raw --post returns the DSM response, not the audit wrapper", async () => {
-  const dsm = { call: async () => ({ log: "stopped" }) } as any;
+test("raw --post returns its response but redacts it from the audit", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  const secret = "PASSWORD: do-not-audit";
+  const dsm = {
+    call: async (opts: { sensitiveResponse?: boolean }) => {
+      assert.equal(opts.sensitiveResponse, true);
+      return { result: { content: secret }, id: "x" };
+    },
+  } as any;
   const out = await cmd("raw").run(
-    ctx({ dsm, args: ["SYNO.Docker.Project", "stop", "id=x"], flags: { post: true } })
+    ctx({
+      auditDir,
+      dsm,
+      args: ["SYNO.Docker.Project", "update", "id=x", `content=${secret}`],
+      flags: { post: true },
+    })
   );
-  assert.deepEqual(out, { log: "stopped" });
+  assert.deepEqual(out, { result: { content: secret }, id: "x" });
+  const line = auditLines(auditDir)[0];
+  assert.doesNotMatch(line, /do-not-audit/);
+  const rec = JSON.parse(line);
+  assert.equal(rec.after.result.content, "***");
 });
 
 test("redactSecrets masks credential-shaped keys, keeps the rest", () => {
@@ -230,6 +292,7 @@ test("redactSecrets masks credential-shaped keys, keeps the rest", () => {
     totp_secret: "SEED",
     api_key: "k",
     token: "t",
+    content: "services:\n  app:\n    environment:\n      PASSWORD: secret",
     id: "SynologyDrive",
     name: "x",
   });
@@ -238,6 +301,7 @@ test("redactSecrets masks credential-shaped keys, keeps the rest", () => {
   assert.equal(r.totp_secret, "***");
   assert.equal(r.api_key, "***");
   assert.equal(r.token, "***");
+  assert.equal(r.content, "***");
   assert.equal(r.id, "SynologyDrive"); // non-secret preserved
   assert.equal(r.name, "x");
 });

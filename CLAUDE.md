@@ -4,7 +4,7 @@ Onboarding for a future Claude session (or any human collaborator). What's here 
 
 ## What this is
 
-`syno`, a CLI over a typed subset of the Synology DSM 7 Web API (packages, security audit, shares, snapshots, backups, storage health, users, firewall, DSM hardening, external access, notifications, certificates) plus an optional read-only SRM router target. It runs on your machine, not on the NAS.
+`syno`, a CLI over a typed subset of the Synology DSM 7 Web API (Container Manager, packages, security audit, shares, snapshots, backups, storage health, users, firewall, DSM hardening, external access, notifications, certificates) plus an optional read-only SRM router target. It runs on your machine, not on the NAS.
 
 `src/commands.ts` is the authoritative command registry. Dispatch, `--help`, and the skill's command table all derive from it, so a command added there needs no other edit to become invocable and documented.
 
@@ -23,7 +23,15 @@ A CLI is a fresh process per invocation, which turns two latent problems into ev
 
 `syno raw <api> <method> [--version=N] [--post] [k=v ...]` reaches any DSM endpoint without a named command. It's the first thing to use when adding a tool: probe the endpoint by hand, confirm the shape, then write the command.
 
-`--post` goes through the same `--yes` gate as the named writes, because DSM treats POST as mutating. `--` stops flag parsing so a DSM param can share a name with a CLI flag.
+`--post` goes through the same `--yes` gate as the named writes. So does any method that `dsmMethodMayMutate` does not recognize as a read, because DSM has mutating endpoints that use GET. `--` stops flag parsing so a DSM param can share a name with a CLI flag.
+
+Opaque configuration params such as `content` are redacted from the DSM trace and raw audit. A Compose document can embed credentials even when the param name itself does not look credential-shaped.
+
+## Container Manager deploy
+
+`src/tools/containers.ts` wraps the operations repeated in live agent sessions: container/project/image inventory, logs, lifecycle control, orphan removal, and an existing-project deploy. Deploy is intentionally not a thin `Project.update`: DSM `start` reuses stale containers after the definition changes. The command stops, updates, calls `Project.build`, then verifies the actual containers.
+
+`Project.build` and `Project.stop` can return code 1202 after doing the requested work. Treat 1202 as ambiguous, never as success. The deploy verifies that at least one container is running, every running health check has left `starting`, none is unhealthy, and each stopped one-shot service exited 0. Container Manager does not pass `--remove-orphans`, so a removed Compose service can survive a rebuild and needs explicit inspection/removal.
 
 Params are form-encoded and DSM JSON-parses each value, so string params need their quotes on the wire (see the form-encoding gotcha below).
 

@@ -61,6 +61,29 @@ export interface DsmCallOptions {
   params?: Record<string, string | number | boolean | undefined>;
   /** Use POST instead of GET (some mutating methods require it). */
   post?: boolean;
+  /** Suppress DEBUG_DSM_RESPONSES payload logging for secret-bearing responses. */
+  sensitiveResponse?: boolean;
+}
+
+/** Credential-shaped params plus opaque configuration documents that commonly
+ * contain embedded credentials. The request still goes to DSM unchanged; only
+ * persistent diagnostics and audit records see the redacted value. */
+const SENSITIVE_PARAM_KEY_RE =
+  /passw|otp|totp|secret|token|api[_-]?key|private[_-]?key|credential|content|compose|ya?ml/i;
+
+export function isSensitiveParamKey(key: string): boolean {
+  return SENSITIVE_PARAM_KEY_RE.test(key);
+}
+
+export function redactSensitiveValues(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitiveValues);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      isSensitiveParamKey(key) ? "***" : redactSensitiveValues(nested),
+    ])
+  );
 }
 
 /** Methods a read-only client (the router) is allowed to call. Anything else —
@@ -75,6 +98,10 @@ const READ_METHODS = new Set([
   "query_info",
   "status",
 ]);
+
+export function dsmMethodMayMutate(method: string): boolean {
+  return !READ_METHODS.has(method);
+}
 
 /** DSM error codes we react to programmatically. The DSM Web API is
  *  reverse-engineered, so this is a small curated subset — see
@@ -98,6 +125,14 @@ export class DsmError extends Error {
     super(message);
     this.name = "DsmError";
   }
+}
+
+/** A state-changing request may complete on DSM after its connection drops.
+ * A DSM response, including an error, makes the outcome known. */
+export function isSoftTransportError(err: unknown): boolean {
+  if (err instanceof DsmError) return false;
+  const message = String((err as { message?: string } | null)?.message ?? err);
+  return /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|terminated/i.test(message);
 }
 
 export interface SynoClientOptions {
@@ -247,7 +282,7 @@ export class SynoClient {
    * codes 117 or 119 and retrying.
    */
   async call<T = any>(opts: DsmCallOptions): Promise<T> {
-    if (this.readOnly && (opts.post || !READ_METHODS.has(opts.method))) {
+    if (this.readOnly && (opts.post || dsmMethodMayMutate(opts.method))) {
       throw new Error(
         `Read-only SynoClient refused ${opts.api}.${opts.method}` +
           `${opts.post ? " (POST)" : ""} — this client is restricted to read methods.`
@@ -292,14 +327,14 @@ export class SynoClient {
     if (this.sid) add("_sid", this.sid);
     for (const [k, v] of Object.entries(opts.params ?? {})) add(k, v);
 
-    // Log every call so Container Manager's log tab has the full DSM trace.
-    // Trim _sid + passwd so the log isn't a secret. Other params are fine —
-    // they're the actual call shape, useful for debugging mismatches.
+    // Log every call so Container Manager's log tab has the DSM trace without
+    // persisting credentials or opaque configuration documents. Compose content
+    // can carry environment secrets even though its key is only `content`.
     const safeParams: Record<string, string> = {};
     const src = opts.post ? body : url.searchParams;
     src.forEach((v, k) => {
-      if (k === "_sid" || k === "passwd" || k === "otp_code") return;
-      safeParams[k] = v;
+      if (k === "_sid") return;
+      safeParams[k] = isSensitiveParamKey(k) ? "***" : v;
     });
     const verb = opts.post ? "POST" : "GET";
     console.error(`[dsm] → ${verb} ${opts.api}.${opts.method}`, safeParams);
@@ -323,18 +358,19 @@ export class SynoClient {
       // sense when you can see the full response, not just the code.
       console.error(
         `[dsm] ✗ ${opts.api}.${opts.method} code=${code}`,
-        JSON.stringify(json.error ?? {})
+        opts.sensitiveResponse ? JSON.stringify({ code }) : JSON.stringify(json.error ?? {})
       );
-      const detail = errs ? ` — ${JSON.stringify(errs)}` : "";
+      const safeErrors = opts.sensitiveResponse ? undefined : errs;
+      const detail = safeErrors ? ` — ${JSON.stringify(safeErrors)}` : "";
       throw new DsmError(
         opts.api,
         opts.method,
         code,
-        errs,
+        safeErrors,
         `${opts.api}.${opts.method} failed (code ${code})${detail}`
       );
     }
-    if (process.env.DEBUG_DSM_RESPONSES === "1") {
+    if (process.env.DEBUG_DSM_RESPONSES === "1" && !opts.sensitiveResponse) {
       const blob = JSON.stringify(json.data ?? {});
       const trimmed = blob.length > 1500 ? blob.slice(0, 1500) + "…" : blob;
       console.error(`[dsm] ✓ ${opts.api}.${opts.method}`, trimmed);

@@ -49,7 +49,7 @@ function helpText(): string {
   }
   lines.push(
     "",
-    "Write commands require --yes. So does `raw --post`, since DSM treats POST as mutating.",
+    "Write commands require --yes. `raw` also requires it for POST or any non-read method.",
     "",
     "Every command prints JSON on stdout; the DSM call trace goes to stderr.",
     "Use `raw` for any endpoint without a named command — see docs/dsm-api-quirks.md",
@@ -74,12 +74,12 @@ async function main(): Promise<Outcome> {
   }
   const { command, args } = resolved;
 
-  if (requiresConfirmation(command, flags) && !(flags.yes === true || flags.yes === "true")) {
+  if (requiresConfirmation(command, flags, args) && !(flags.yes === true || flags.yes === "true")) {
     return {
       code: 2,
       stderr:
         `Refusing to run "${command.name}" without --yes.\n` +
-        `This command changes state on the NAS. Re-run with --yes to confirm.`,
+        `This command may change state on the NAS. Re-run with --yes to confirm.`,
     };
   }
 
