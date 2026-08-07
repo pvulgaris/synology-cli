@@ -5,11 +5,11 @@ description: "Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: C
 
 # Synology NAS
 
-`syno` is a command-line tool that talks to DSM's Web API. Every command prints JSON on stdout (pipe it to `jq`); concise progress and errors go to stderr. Add `--verbose` only when the API trace is needed. Exit 0 on success, 1 on failure, 2 on a usage error.
+`syno` is a command-line tool for DSM and SRM. Every command prints JSON on stdout (pipe it to `jq`); concise progress and errors go to stderr. Add `--verbose` only when the API trace is needed. Exit 0 on success, 1 on failure, 2 on a usage error.
 
-Auth is owned by the CLI: it reads DSM credentials from the environment, logs in, and caches the session. The DSM account is in the `administrators` group because DSM 7 gates its admin APIs on that membership. Compensating controls (2FA, no SSH service, network ACL) live outside this skill, so don't relax them.
+Auth is owned by the CLI. It loads and caches only the selected target. DSM uses `DSM_*`; SRM uses `SRM_*` and works without DSM configuration. The DSM account is in the `administrators` group because DSM 7 gates its admin APIs on that membership. SRM is read-only at the client layer.
 
-`syno --help` lists every command. This file covers what `--help` can't: which commands to compose for a given request, and how to turn their output into stable audit findings.
+Use `syno help --json` for the authoritative command, input, platform, and mutation inventory. This file covers which commands to compose for a request and how to turn their output into stable audit findings.
 
 ## When to use
 
@@ -19,59 +19,15 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 - **Package research**: "what's a good package for X?", "should I install Y?". Compose with WebSearch plus `syno packages list` so you don't recommend what's already installed.
 - **Security audit**: "audit security", "is my NAS configured safely?". Fan out the read commands below and group the findings.
 
-## Command inventory
-
-**Read commands (free to invoke):**
-
-| Command | Returns |
-|---|---|
-| `syno status` | model, DSM version, uptime, temp, CPU/memory |
-| `syno storage` | volumes (RAID, size), drives (S.M.A.R.T., temp) |
-| `syno packages list` | installed packages + versions + status |
-| `syno packages updates` | pending updates with installed and available versions (excluding DSM itself) |
-| `syno packages info <name>` | installed and available versions plus package metadata |
-| `syno security scan` | Security Advisor check counts + the failing rules (passes/skips are counted, not listed) |
-| `syno users list` | accounts: 2FA on/off, computed `active` boolean (the CLI reads DSM's `expired` field so you don't have to), raw `expired` |
-| `syno security firewall` | rules, auto-block, per-adapter DoS protection |
-| `syno security settings` | web hardening (HTTPS-redirect/HSTS/CSRF/CSP/IP-check/session-timeout), TLS profile per service, SSH, SMB, NFS, auto-update, password policy, Active Insight |
-| `syno shares list` | shares incl. encryption, quota (mb used/total), recycle-bin, snapshot support |
-| `syno shares snapshots <share>` | Btrfs snapshots for one share, with immutable/WORM lock state |
-| `syno shares snapshot-config <share>` | snapshot task config: schedule (enabled, time, days, next run) + retention (Smart Recycle counts, retain days). Per-snapshot lock state is in `shares snapshots`, not here |
-| `syno backup tasks` | Hyper Backup tasks: destination, encryption, schedule, last result. Returns `{ tasks: [], note }` if Hyper Backup isn't installed, not an error |
-| `syno tasks list` | DSM Task Scheduler entries |
-| `syno containers list` | Container Manager containers: image, state, health, exit code, restart count |
-| `syno containers logs <name> [--limit=N]` | Recent container logs in chronological order. DSM's endpoint is POST-only, but this is a read and needs no confirmation |
-| `syno containers projects list` | Compose projects: id, name, status, container count |
-| `syno containers projects info <name-or-id>` | Normalized project and container state. Omits the Compose document because it may contain secrets |
-| `syno containers images list` | Local image inventory: repository, tags, id, size, update flag |
-| `syno external` | QuickConnect, DDNS, App Portal HTTPS-per-app, reverse-proxy rules, port forwarding |
-| `syno notifications` | SMTP mail config: server, ssl, verify-cert, sender, recipient count |
-| `syno certificates` | cert inventory with `days_until_expiry`, services, self-signed flag |
-| `syno updates` | pending updates across DSM OS, NAS packages, router OS, router packages |
-| `syno dsm update-check` | whether a DSM OS update is available (detect only) |
-| `syno router update-check` | whether an SRM router OS update is available (detect only) |
-
-**Write commands (require `--yes`, see Write flow below):**
-
-| Command | Effect | Returns |
-|---|---|---|
-| `syno packages install <name> --yes` | Install a package from the Synology repo | `{ before, after, verified }` |
-| `syno packages update <name> --yes` | Update an installed package to latest | `{ before, after, verified }` |
-| `syno packages uninstall <name> --keep-data --yes` | Remove a package, preserving its data | `{ before, after, removed }` |
-| `syno packages control <name> <start\|stop\|restart> --yes` | Start/stop/restart a package | status poll result |
-| `syno containers control <name> <start\|stop> --yes` | Start or stop one container | `{ before, after }`; exits nonzero unless verified |
-| `syno containers remove <name> --yes` | Remove one stopped container | `{ before, after }`; exits nonzero unless verified |
-| `syno containers projects deploy <name-or-id> --file=PATH --yes` | Stop an existing project, replace its Compose definition, build, and verify ready containers | `{ before, after, compose_sha256 }`; exits nonzero unless verified |
-
 ## The `raw` escape hatch
 
-Anything DSM exposes but `syno` has no named command for is reachable with:
+Anything the selected Synology target exposes but `syno` has no named command for is reachable with:
 
 ```
-syno raw <api> <method> [--version=N] [--post] [k=v ...]
+syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [k=v ...]
 ```
 
-Params are form-encoded and DSM JSON-parses each value, so **string params need their quotes on the wire**: `name='"FileStation"'`. Bools and numbers are literal (`beta=false`), arrays and objects are JSON-stringified. `--post` is a write in DSM's eyes and needs `--yes` like any other write.
+Prefer `--params-json` so the CLI handles Synology's wire quoting. The trailing `k=v` form sends direct wire values. Do not combine the forms. `--post` and non-read methods need `--yes`; SRM refuses all mutations even with confirmation.
 
 Use `--` to stop flag parsing when a DSM param name collides with a CLI flag: `syno raw SYNO.Foo get -- --version=3` sends a literal param rather than setting the API version.
 
@@ -83,10 +39,7 @@ Writes need `--yes` on the command line. Nothing prompts you, so the confirmatio
 
 For each write:
 
-1. Read the current state with the command for the action:
-   - Update: run `syno packages updates`, select the matching entry, and use its `id`, `installed_version`, and `available_version`. If no entry matches, don't propose an update.
-   - Install: run `syno packages info <name>` and use its `installed_version` and `available_version`.
-   - Uninstall: run `syno packages list` and select the installed package.
+1. Read the current state first (`syno packages list` or `syno packages info <name>`).
 2. Render this exact confirmation block in prose and wait for a literal `yes`:
    ```
    Update proposed:

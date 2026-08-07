@@ -1,7 +1,7 @@
 {
   "name": "synology-cli",
   "version": "0.5.0",
-  "description": "Command-line access to a Synology NAS (DSM 7) and SRM router — packages, security audit, shares, snapshots, backups, storage health, cross-device update detection, and a raw escape hatch to any DSM Web API endpoint.",
+  "description": "Agent-oriented command-line access to Synology DSM and SRM, with curated operations and a raw Web API escape hatch.",
   "type": "module",
   "license": "MIT",
   "author": "Peter Vulgaris",
@@ -28,11 +28,12 @@
     "dist/"
   ],
   "scripts": {
-    "build": "tsc",
-    "prepare": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "prepare": "npm run build",
     "dev": "tsx src/cli.ts",
     "verify": "tsx src/dev/verify-tools.ts",
-    "test": "node --import tsx --test --test-force-exit src/*.test.ts src/tools/*.test.ts"
+    "test": "npm run build && node --import tsx --test --test-force-exit src/*.test.ts src/tools/*.test.ts"
   },
   "dependencies": {
     "otplib": "^12.0.1"

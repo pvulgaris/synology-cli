@@ -21,7 +21,7 @@ DSM error codes are NOT what they sound like — verified against [N4S4/synology
 
 - **`requestFormat: "JSON"` in `SYNO.API.Info` describes the *response* format, not the request.** Always send form-encoded params (GET querystring or POST `application/x-www-form-urlencoded`). Sending a JSON body yields 101 because DSM never parses api/method/version out of it.
 - **Arrays go as a single form field with JSON-stringified value** — e.g. `configs=[{"adapter":"eth0"}]` URL-encoded into one param. Pattern used by `SYNO.Core.Security.DoS.get` and others that operate per-adapter.
-- **POST is required for state-changing calls.** GET often yields 503 / "fetch failed" mid-flight. Set `post: true` on `DsmCallOptions`.
+- **POST is required for state-changing calls.** GET often yields 503 / "fetch failed" mid-flight. Set `post: true` on `SynologyCallOptions`.
 - **DSM frequently drops the TCP connection mid-execution on state changes** (`Package.Control.stop`, `Project.build`, etc.). The action still completes server-side. Catch network-level errors (`fetch failed` / `ECONNRESET` / `ETIMEDOUT` / `socket hang up`) and verify via a status-poll instead of bailing.
 
 ## Response shape

@@ -4,9 +4,11 @@ Onboarding for a future Claude session (or any human collaborator). What's here 
 
 ## What this is
 
-`syno`, a CLI over a typed subset of the Synology DSM 7 Web API (Container Manager, packages, security audit, shares, snapshots, backups, storage health, users, firewall, DSM hardening, external access, notifications, certificates) plus an optional read-only SRM router target. It runs on your machine, not on the NAS.
+`syno`, an agent-oriented CLI over a typed subset of the Synology Web API. DSM and read-only SRM are independent peer targets. It runs on your machine, not on either device.
 
-`src/commands.ts` is the authoritative command registry. Dispatch, `--help`, and the skill's command table all derive from it, so a command added there needs no other edit to become invocable and documented.
+`src/commands.ts` is authoritative for dispatch, strict input validation, supported platforms, `--help`, and `syno help --json`. The README and skill point agents to that manifest instead of duplicating the inventory. [Issue #31](https://github.com/pvulgaris/synology-cli/issues/31) records the modernization design and completion criteria.
+
+Resolve and validate a command before loading target configuration or credentials. An ordinary handler receives one target and one client. An aggregate command loads each configured target explicitly and reports source failures independently.
 
 Response shapes are deliberately frozen. `skills/synology/SKILL.md` maps audit findings to specific fields (`firewall_enabled`, `web_hardening.https_redirect`, `smb.min_protocol`), so reshaping a tool's output silently breaks those rules.
 
@@ -15,15 +17,15 @@ Response shapes are deliberately frozen. `skills/synology/SKILL.md` maps audit f
 A CLI is a fresh process per invocation, which turns two latent problems into everyday ones: every run would log in, and DSM rejects a second login that reuses the same 30-second TOTP code. So the SID cache in `src/session.ts` is load-bearing, not a dev convenience.
 
 - Session files live at `~/.local/state/syno/session-<label>.json`, mode 0600, written temp-file-then-rename.
-- An `O_EXCL` lock file next to it serializes logins across processes, so `syno status & syno shares list &` doesn't race two logins into a TOTP-reuse 404. A lock older than 45s is presumed abandoned and broken.
+- An `O_EXCL` lock file next to it serializes logins across processes, so `syno status & syno shares list &` doesn't race two logins into a TOTP-reuse 404. A lock older than 90s is presumed abandoned and broken.
 - When a login genuinely is needed inside the window that produced the last SID, `awaitFreshTotpWindow` waits for the next code rather than burning the current one. That wait is why the stale-lock bound must stay above 30s: a holder waiting out a TOTP window is not stuck.
-- The router gets a session file too. The daemon deliberately withheld one (SRM expires sessions faster than the 10-minute TTL, so a stale SID meant 119 → re-login → 404), but that failure mode is exactly what the TOTP-window wait now handles, and withholding the cache from a per-process CLI would guarantee a login on every router call.
+- DSM and SRM get independent session files keyed by target and account. A rejected cached SID waits for a fresh TOTP window before re-login.
 
 ## `raw`
 
-`syno raw <api> <method> [--version=N] [--post] [k=v ...]` reaches any DSM endpoint without a named command. It's the first thing to use when adding a tool: probe the endpoint by hand, confirm the shape, then write the command.
+`syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [k=v ...]` reaches an endpoint without a named command. Prefer `--params-json`; it handles Synology's form-value quoting.
 
-`--post` goes through the same `--yes` gate as the named writes. So does any method that `dsmMethodMayMutate` does not recognize as a read, because DSM has mutating endpoints that use GET. `--` stops flag parsing so a DSM param can share a name with a CLI flag.
+`--post` goes through the same `--yes` gate as the named writes. So does any method that `methodMayMutate` does not recognize as a read, because Synology has mutating endpoints that use GET. SRM refuses all mutations at the client policy layer.
 
 Opaque configuration params such as `content` are redacted from the DSM trace and raw audit. A Compose document can embed credentials even when the param name itself does not look credential-shaped.
 
@@ -37,7 +39,7 @@ Params are form-encoded and DSM JSON-parses each value, so string params need th
 
 ## Writes require `--yes`
 
-Under MCP the client prompted the user before invoking a write tool. Nothing plays that role for a CLI, so the gate lives in `requiresConfirmation` (`commands.ts`) or it doesn't exist at all. Without it an agent composing commands could uninstall a package with no confirmation step.
+The CLI does not prompt, so the gate lives in `requiresConfirmation` (`commands.ts`). Without it an agent composing commands could uninstall a package with no confirmation step.
 
 ## Write flow: install & update (two-phase, download then install-from-path)
 
@@ -64,11 +66,11 @@ Under MCP the client prompted the user before invoking a write tool. Nothing pla
 
 **Uninstall data deletion is package-specific (HAR-verified 2026-06-23).** Package Center's "Delete the items listed above" checkbox rides `extra_values` carrying a **per-package** wizard key (`"{\"pkgwizard_remove_cstn_db\":true}"` for Synology Drive; ABB and others differ). That key is defined in each package's own client-side uninstall wizard and isn't exposed by any queryable API: `is_uninstall_pages:true` in `Package.list` only flags that a dialog exists, and `Uninstallation` has no precheck method. So we can detect a data-bearing package but can't safely drive its delete-data option blind. `nasPackageUninstall` therefore only ever does the data-preserving uninstall (omit `extra_values`): when `is_uninstall_pages` is true it returns `status:"needs_data_confirmation"` and requires `--keep-data` to proceed, and `--keep-data` omitted is refused with a pointer to the DSM UI, the honest path for actual deletion.
 
-## Router (SRM) support
+## SRM support
 
-The CLI optionally targets a Synology router. `SRM_BASE_URL` alone enables it; without it the router commands error out with that hint.
+SRM is independent of DSM. An SRM-only command loads only `SRM_*`, so it works when no `DSM_*` variables are present.
 
-- The router client is **read-only** at the `SynoClient` level (any POST or non-read method is refused). "DSM vs SRM" is expressed entirely as data of type `TargetConfig` (`config.ts`), the slice of `Config` a client actually reads. Because `TargetConfig` has no `router` field, `makeRouterClient(routerTargetFrom(cfg))` is a compile error rather than a runtime guard.
+- The target is **read-only** at the `SynoClient` level. Authentication path, version, credential prefix, session, and policy are fields on `TargetConfig`. The generic client in `client.ts` has no DSM/SRM construction branch.
 - SRM's package and upgrade reads are admin-gated with no selective grant, so `SRM_USER` must be an admin. SRM does support extra admins (Control Panel → User → "Grant administrator privilege"; the widely-cited "primary admin only" claim is pre-1.3), so use a dedicated account. A Normal user gets code 402 at login.
 - **Verified live (SRM 1.3.1 / RT6600ax, 2026-06-26):** router login is at `auth.cgi` with `SYNO.API.Auth` **v3** (DSM's `entry.cgi`/v6 returns 102); SRM reuses `SYNO.Core.Upgrade.Server check` v1 and returns DSM's flat `{available, version}` shape, with `current_version` from `SYNO.Core.System info` at **v1** (v3 is DSM-only, 104s on SRM); SRM's admin-gated reads don't need `enable_syno_token`.
 - **SRM has no package-update API.** `SYNO.Core.Package.Server` returns 103, so there is deliberately no `router packages updates` command. The `syno updates` digest carries that as an honest note on its `router_packages` source instead.
@@ -116,13 +118,13 @@ It returns every package installable on this DS (105+ items) with no `installed_
 
 ### TLS verification is process-wide via `NODE_TLS_REJECT_UNAUTHORIZED=0`
 
-A per-fetch `undici` Agent for scoped TLS skip was tried and reverted: it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" plus silently-empty responses on some endpoints). The skip is now set process-wide at startup when `cfg.tlsSkipVerify` is true. The blast radius is bounded to DSM-shaped targets (the NAS, and SRM when configured, both self-signed). If you add a non-Synology outbound, route THAT call through a per-call verifying Agent (`rejectUnauthorized:true`) to override the global skip. The enforcing direction is safe on Node 22; only the skipping per-fetch agent broke.
+A per-fetch `undici` Agent for scoped TLS skip was tried and reverted: it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" plus silently-empty responses on some endpoints). The skip is now set process-wide at startup when `runtime.tlsSkipVerify` is true. The blast radius is bounded to Synology targets. If you add a non-Synology outbound, route that call through a per-call verifying Agent (`rejectUnauthorized:true`) to override the global skip. The enforcing direction is safe on Node 22; only the skipping per-fetch agent broke.
 
 Worth knowing: the router login transmits the SRM admin password over the unverified self-signed link, so a LAN MITM between you and the router could harvest it. Pin the SRM cert if that's in your threat model.
 
 ### No `synology-api` npm dep on purpose
 
-Several `synology-*` npm packages exist. None covered `SYNO.Core.Package`, `SYNO.SecurityAdvisor.*`, and `SYNO.Core.Share` with the field-level options needed here. Rolling a thin client (~200 lines in `dsm.ts`) was cleaner than wrapping a community lib for partial coverage. Don't add one unless it grows into mature coverage.
+Several `synology-*` npm packages exist. None covered `SYNO.Core.Package`, `SYNO.SecurityAdvisor.*`, and `SYNO.Core.Share` with the field-level options needed here. The thin client in `client.ts` remains smaller than wrapping a community library for partial coverage.
 
 ## Deliberately deferred (don't pre-build)
 

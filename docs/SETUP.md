@@ -1,6 +1,6 @@
 # Setup
 
-One-time DSM setup, then wire credentials into your shell. All of it is clickthrough in DSM except the last step.
+Configure the DSM or SRM targets you use, then wire their credentials into your shell. The targets are independent.
 
 ## 1. Dedicated DSM user
 
@@ -43,7 +43,7 @@ Plus `DSM_BASE_URL` (e.g. `https://nas.local:5001`) and, optionally, `DSM_USER` 
 
 Populate them however you like. A secret-manager launcher works, as does a `chmod 600` file or plain env for a throwaway shell.
 
-For a router target, the same pattern with the `SRM_` prefix, plus `SRM_BASE_URL`. The router client is read-only and needs a dedicated SRM admin (Control Panel → User → Grant administrator privilege); a normal user gets code 402 at login.
+For an SRM target, use the same pattern with the `SRM_` prefix, plus `SRM_BASE_URL`. SRM commands do not require any `DSM_*` variables. The client is read-only and needs a dedicated SRM admin (Control Panel → User → Grant administrator privilege); a normal user gets code 402 at login.
 
 ## 3. Install
 
@@ -56,9 +56,10 @@ syno --help
 
 ```sh
 syno status
+syno router update-check
 ```
 
-Expect JSON with model, DSM version, uptime and load. If login fails, DSM answers with a code rather than a message: 400 is a bad password, 404 is a rejected 2FA code (usually a wrong or stale TOTP secret), 402 means the account isn't an admin.
+Run the command for each configured target. `syno status` needs only DSM configuration; `syno router update-check` needs only SRM configuration. If login fails, the device answers with a code rather than a message: 400 is a bad password, 404 is a rejected 2FA code (usually a wrong or stale TOTP secret), 402 means the account isn't an admin.
 
 The first run writes a session file to `~/.local/state/syno/`, so subsequent commands reuse the login instead of burning a TOTP code each time.
 
