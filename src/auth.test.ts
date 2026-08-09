@@ -48,8 +48,8 @@ function tmpSecret(contents: string): string {
   return path;
 }
 
-// Clear the env vars these tests toggle so an ambient DSM_* in the shell (dev
-// source-creds) can't leak in and flip a result.
+// Clear the env vars these tests toggle so ambient DSM_* values from the parent
+// shell can't leak in and flip a result.
 const CLEAR = {
   DSM_PASSWORD: undefined,
   DSM_PASSWORD_FILE: undefined,
@@ -195,4 +195,3 @@ test("*_FILE that is a symlink is refused (not followed)", async () => {
     }
   );
 });
-

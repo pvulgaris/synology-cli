@@ -41,7 +41,7 @@ The CLI reads credentials from the environment, or from files if you'd rather no
 
 Plus `DSM_BASE_URL` (e.g. `https://nas.local:5001`) and, optionally, `DSM_USER` if you didn't name the account `claude-mcp`.
 
-Populate them however you like. A launcher that fetches from your password manager works (`op run`, `sops exec-env`), as does a `chmod 600` file, as does plain env for a throwaway shell.
+Populate them however you like. A secret-manager launcher works, as does a `chmod 600` file or plain env for a throwaway shell.
 
 For a router target, the same pattern with the `SRM_` prefix, plus `SRM_BASE_URL`. The router client is read-only and needs a dedicated SRM admin (Control Panel → User → Grant administrator privilege); a normal user gets code 402 at login.
 

@@ -3,8 +3,7 @@
  * print the result. Used by `npm run verify` after `npm run deploy` to confirm
  * Phase 3 fixes return populated payloads.
  *
- * Usage: source dev/source-creds.sh && DSM_BASE_URL=https://nas.local:5001 \
- *        npx tsx src/dev/verify-tools.ts [tool-name]
+ * Usage: npx tsx src/dev/verify-tools.ts [tool-name]
  *
  * No tool name → run the whole suite. Tool name → run just that one.
  */
