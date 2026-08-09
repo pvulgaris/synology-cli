@@ -8,7 +8,7 @@
  *
  * Secrets (password, TOTP seed, wire bearer) are resolved in auth.ts from
  * `<NAME>_FILE` or a direct env var — populate them however you like (write a
- * file, export the env, or fill it at launch with `op run` / sops). No built-in
+ * file, export the env, or fill it through a secret-manager launcher). No built-in
  * secret-manager dependency.
  *
  * Optional:

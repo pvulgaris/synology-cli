@@ -11,7 +11,7 @@
  *      posture — it lands in the container config on disk and the env surfaces above).
  *
  * How the env/files get populated is up to the operator: write a file, export the
- * env directly, or fill it at launch with `op run` / sops / any secret manager.
+ * env directly, or fill it through a secret-manager launcher.
  * The server has no built-in secret-manager dependency.
  */
 
