@@ -295,13 +295,20 @@ export async function nasPackageInfo(
   dsm: SynoClient,
   args: { name: string }
 ) {
-  const data = await dsm.call<CatalogListResp>({
-    api: "SYNO.Core.Package.Server",
-    method: "list",
-    version: 2,
-    params: { tab: "all" },
-  });
-  const pkg = (data?.packages ?? []).find(
+  const [catalog, installed] = await Promise.all([
+    dsm.call<CatalogListResp>({
+      api: "SYNO.Core.Package.Server",
+      method: "list",
+      version: 2,
+      params: { tab: "all" },
+    }),
+    dsm.call<PackageListResp>({
+      api: "SYNO.Core.Package",
+      method: "list",
+      version: 2,
+    }),
+  ]);
+  const pkg = (catalog?.packages ?? []).find(
     (p) => p.id === args.name || p.dname === args.name
   );
   if (!pkg) {
@@ -310,10 +317,14 @@ export async function nasPackageInfo(
     );
   }
   const info = normalizeCatalogPackage(pkg);
+  const installedPackage = (installed?.packages ?? []).find(
+    (p) => p.id === info.id
+  );
   return {
     id: info.id,
     name: info.name,
-    version: info.version,
+    installed_version: installedPackage?.version ?? null,
+    available_version: info.version,
     publisher: info.publisher,
     description: info.description,
     changelog: info.changelog,

@@ -277,7 +277,7 @@ export const COMMANDS: Command[] = [
   },
   {
     name: "packages info",
-    summary: "Metadata for one package: publisher, description, changelog, dependencies, size.",
+    summary: "Installed and available versions plus publisher, changelog, dependencies, and size.",
     usage: "<name>",
     run: (ctx) => nasPackageInfo(ctx.dsm, { name: arg(ctx, 0, "name") }),
   },
