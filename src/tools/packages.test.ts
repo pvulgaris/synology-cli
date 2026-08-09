@@ -245,6 +245,9 @@ test("nas_package_info: surfaces name/publisher/description/dependencies from th
   const dsm = makeCatalogFake();
   const res = (await nasPackageInfo(dsm, { name: "Tailscale" })) as any;
   assert.equal(res.name, "Tailscale");
+  assert.equal(res.installed_version, "1.58.2-700058000");
+  assert.equal(res.available_version, "1.58.2-700058002");
+  assert.equal("version" in res, false);
   assert.equal(res.publisher, "Tailscale, Inc.");
   assert.equal(res.description, "Connect all your devices using WireGuard, without the hassle.");
   assert.equal(res.dependencies, null);
@@ -254,6 +257,8 @@ test("nas_package_info: matches by display name (dname), not just id", async () 
   const dsm = makeCatalogFake();
   const res = (await nasPackageInfo(dsm, { name: "Universal Viewer" })) as any;
   assert.equal(res.id, "UniversalViewer");
+  assert.equal(res.installed_version, null);
+  assert.equal(res.available_version, "1.4.0-0712");
 });
 
 test("nas_packages_check_updates: pending entries carry the real display name", async () => {

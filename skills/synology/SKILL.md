@@ -1,6 +1,6 @@
 ---
 name: synology
-description: Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: Container Manager, packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, containers, package updates / research / installation / removal, or security posture.
+description: "Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: Container Manager, packages, security audit, shares, snapshots, backups, storage health. Use when the user asks about NAS status, containers, package updates / research / installation / removal, or security posture."
 ---
 
 # Synology NAS
@@ -28,8 +28,8 @@ Auth is owned by the CLI: it reads DSM credentials from the environment, logs in
 | `syno status` | model, DSM version, uptime, temp, CPU/memory |
 | `syno storage` | volumes (RAID, size), drives (S.M.A.R.T., temp) |
 | `syno packages list` | installed packages + versions + status |
-| `syno packages updates` | pending updates (excluding DSM itself) |
-| `syno packages info <name>` | metadata for one package (publisher, changelog, deps) |
+| `syno packages updates` | pending updates with installed and available versions (excluding DSM itself) |
+| `syno packages info <name>` | installed and available versions plus package metadata |
 | `syno security scan` | Security Advisor check counts + the failing rules (passes/skips are counted, not listed) |
 | `syno users list` | accounts: 2FA on/off, computed `active` boolean (the CLI reads DSM's `expired` field so you don't have to), raw `expired` |
 | `syno security firewall` | rules, auto-block, per-adapter DoS protection |
@@ -83,7 +83,10 @@ Writes need `--yes` on the command line. Nothing prompts you, so the confirmatio
 
 For each write:
 
-1. Read the current state first (`syno packages list` or `syno packages info <name>`).
+1. Read the current state with the command for the action:
+   - Update: run `syno packages updates`, select the matching entry, and use its `id`, `installed_version`, and `available_version`. If no entry matches, don't propose an update.
+   - Install: run `syno packages info <name>` and use its `installed_version` and `available_version`.
+   - Uninstall: run `syno packages list` and select the installed package.
 2. Render this exact confirmation block in prose and wait for a literal `yes`:
    ```
    Update proposed:
