@@ -3,14 +3,17 @@ import assert from "node:assert/strict";
 
 import { DsmError, SynoClient, isSoftTransportError } from "./dsm.js";
 
-function sessionClient(): SynoClient {
-  const client = new SynoClient({
-    baseUrl: "https://example.test",
-    user: "agent",
-    session: "test",
-    authVersion: 6,
-    authPath: "entry.cgi",
-  });
+function sessionClient(verbose = false): SynoClient {
+  const client = new SynoClient(
+    {
+      baseUrl: "https://example.test",
+      user: "agent",
+      session: "test",
+      authVersion: 6,
+      authPath: "entry.cgi",
+    },
+    { verbose }
+  );
   Object.assign(client as any, { sid: "test-sid", sidObtainedAt: Date.now() });
   return client;
 }
@@ -23,8 +26,33 @@ test("transport errors are soft only when DSM did not respond", () => {
   );
 });
 
+test("successful DSM calls are quiet unless verbose", async () => {
+  const quietClient = sessionClient();
+  const verboseClient = sessionClient(true);
+  const originalFetch = globalThis.fetch;
+  const originalError = console.error;
+  const trace: unknown[][] = [];
+  globalThis.fetch = (async () => ({
+    json: async () => ({ success: true, data: { ok: true } }),
+  })) as typeof fetch;
+  console.error = (...args: unknown[]) => trace.push(args);
+
+  try {
+    await quietClient.call({ api: "SYNO.Foo", method: "get" });
+    assert.deepEqual(trace, []);
+    await verboseClient.call({ api: "SYNO.Foo", method: "get" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+
+  const renderedTrace = JSON.stringify(trace);
+  assert.match(renderedTrace, /→ GET SYNO\.Foo\.get/);
+  assert.match(renderedTrace, /✓ SYNO\.Foo\.get/);
+});
+
 test("DSM traces omit Compose content from requests and debug responses", async () => {
-  const client = sessionClient();
+  const client = sessionClient(true);
   const secret = "services:\n  app:\n    environment:\n      PASSWORD: do-not-log";
   const originalFetch = globalThis.fetch;
   const originalError = console.error;
@@ -93,5 +121,7 @@ test("sensitive DSM errors omit response content from traces and exceptions", as
     console.error = originalError;
   }
 
-  assert.doesNotMatch(JSON.stringify(trace), /do-not-log/);
+  const renderedTrace = JSON.stringify(trace);
+  assert.doesNotMatch(renderedTrace, /do-not-log/);
+  assert.match(renderedTrace, /code=1202/);
 });

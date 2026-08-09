@@ -5,11 +5,11 @@
  *
  * Output contract, chosen for agent use as much as human use:
  *   - stdout is only ever the result, as JSON. Pipe it to jq without filtering.
- *   - stderr carries the DSM call trace and any error.
+ *   - stderr carries concise progress and errors; --verbose adds the API trace.
  *   - exit 0 on success, 1 on failure, 2 on a usage error.
  *
  * Required env: DSM_BASE_URL, plus credentials (see auth.ts — env, *_FILE, or a
- * launcher like `op run`). SRM_BASE_URL optionally adds the router.
+ * secret-manager launcher). SRM_BASE_URL optionally adds the router.
  */
 
 import { loadConfig } from "./config.js";
@@ -51,7 +51,8 @@ function helpText(): string {
     "",
     "Write commands require --yes. `raw` also requires it for POST or any non-read method.",
     "",
-    "Every command prints JSON on stdout; the DSM call trace goes to stderr.",
+    "Every command prints JSON on stdout; progress and errors go to stderr.",
+    "Use --verbose to add the DSM API trace to stderr.",
     "Use `raw` for any endpoint without a named command — see docs/dsm-api-quirks.md",
     "for the form-encoding rules (string params need JSON quotes)."
   );
@@ -92,8 +93,9 @@ async function main(): Promise<Outcome> {
   if (cfg.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
-  const dsm = new SynoClient(cfg);
-  const router = makeRouterClient(cfg);
+  const verbose = flags.verbose === true || flags.verbose === "true";
+  const dsm = new SynoClient(cfg, { verbose });
+  const router = makeRouterClient(cfg, { verbose });
 
   const result = await command.run({ cfg, dsm, router, args, flags });
   return { code: 0, stdout: JSON.stringify(result, null, 2) };

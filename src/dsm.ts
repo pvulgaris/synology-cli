@@ -143,6 +143,8 @@ export interface SynoClientOptions {
   /** Override how login secrets are fetched. The router passes the bearer-free
    *  loader; default is the MCP's own `loadCredentials`. */
   credLoader?: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
+  /** Print each API request and successful response to stderr. */
+  verbose?: boolean;
 }
 
 export class SynoClient {
@@ -151,6 +153,7 @@ export class SynoClient {
   private sidObtainedAt = 0;
   private readonly readOnly: boolean;
   private readonly credLoader: (cfg: TargetConfig) => Promise<DsmOnlyCredentials>;
+  private readonly verbose: boolean;
   // Concurrent ensureSession() calls share the in-flight login. Without this,
   // a Promise.all of MCP tool calls fires N parallel logins that all reuse the
   // same 30s TOTP code; DSM accepts the first and 404s the rest.
@@ -162,6 +165,7 @@ export class SynoClient {
   constructor(private cfg: TargetConfig, opts: SynoClientOptions = {}) {
     this.readOnly = opts.readOnly ?? false;
     this.credLoader = opts.credLoader ?? loadCredentials;
+    this.verbose = opts.verbose ?? false;
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
       const cached = readSession(cachePath);
@@ -327,17 +331,19 @@ export class SynoClient {
     if (this.sid) add("_sid", this.sid);
     for (const [k, v] of Object.entries(opts.params ?? {})) add(k, v);
 
-    // Log every call so Container Manager's log tab has the DSM trace without
-    // persisting credentials or opaque configuration documents. Compose content
-    // can carry environment secrets even though its key is only `content`.
-    const safeParams: Record<string, string> = {};
-    const src = opts.post ? body : url.searchParams;
-    src.forEach((v, k) => {
-      if (k === "_sid") return;
-      safeParams[k] = isSensitiveParamKey(k) ? "***" : v;
-    });
-    const verb = opts.post ? "POST" : "GET";
-    console.error(`[dsm] → ${verb} ${opts.api}.${opts.method}`, safeParams);
+    const verbose = this.verbose || process.env.DEBUG_DSM_RESPONSES === "1";
+    if (verbose) {
+      // Keep credentials and opaque configuration documents out of the trace.
+      // Compose content can carry secrets even though its key is only `content`.
+      const safeParams: Record<string, string> = {};
+      const src = opts.post ? body : url.searchParams;
+      src.forEach((v, k) => {
+        if (k === "_sid") return;
+        safeParams[k] = isSensitiveParamKey(k) ? "***" : v;
+      });
+      const verb = opts.post ? "POST" : "GET";
+      console.error(`[dsm] → ${verb} ${opts.api}.${opts.method}`, safeParams);
+    }
 
     const headers: Record<string, string> = {};
     if (opts.post) headers["Content-Type"] = "application/x-www-form-urlencoded";
@@ -370,12 +376,14 @@ export class SynoClient {
         `${opts.api}.${opts.method} failed (code ${code})${detail}`
       );
     }
-    if (process.env.DEBUG_DSM_RESPONSES === "1" && !opts.sensitiveResponse) {
-      const blob = JSON.stringify(json.data ?? {});
-      const trimmed = blob.length > 1500 ? blob.slice(0, 1500) + "…" : blob;
-      console.error(`[dsm] ✓ ${opts.api}.${opts.method}`, trimmed);
-    } else {
-      console.error(`[dsm] ✓ ${opts.api}.${opts.method}`);
+    if (verbose) {
+      if (process.env.DEBUG_DSM_RESPONSES === "1" && !opts.sensitiveResponse) {
+        const blob = JSON.stringify(json.data ?? {});
+        const trimmed = blob.length > 1500 ? blob.slice(0, 1500) + "…" : blob;
+        console.error(`[dsm] ✓ ${opts.api}.${opts.method}`, trimmed);
+      } else {
+        console.error(`[dsm] ✓ ${opts.api}.${opts.method}`);
+      }
     }
     return (json.data ?? ({} as T));
   }
@@ -388,10 +396,14 @@ export class SynoClient {
 /** Build the router (SRM) client from a Config, or null when no router target is
  *  configured. Always read-only and bearer-free — the single place that wiring
  *  lives, so the daemon and the CLI can't drift. */
-export function makeRouterClient(cfg: Config): SynoClient | null {
+export function makeRouterClient(
+  cfg: Config,
+  opts: Pick<SynoClientOptions, "verbose"> = {}
+): SynoClient | null {
   if (!cfg.router) return null;
   return new SynoClient(routerTargetFrom(cfg), {
     readOnly: true,
     credLoader: () => loadDsmOnlyCredentials("SRM"),
+    ...opts,
   });
 }
