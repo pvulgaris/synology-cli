@@ -5,7 +5,7 @@ description: "Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: C
 
 # Synology NAS
 
-`syno` is a command-line tool that talks to DSM's Web API. Every command prints JSON on stdout (pipe it to `jq`); the DSM call trace goes to stderr. Exit 0 on success, 1 on failure, 2 on a usage error.
+`syno` is a command-line tool that talks to DSM's Web API. Every command prints JSON on stdout (pipe it to `jq`); concise progress and errors go to stderr. Add `--verbose` only when the API trace is needed. Exit 0 on success, 1 on failure, 2 on a usage error.
 
 Auth is owned by the CLI: it reads DSM credentials from the environment, logs in, and caches the session. The DSM account is in the `administrators` group because DSM 7 gates its admin APIs on that membership. Compensating controls (2FA, no SSH service, network ACL) live outside this skill, so don't relax them.
 

@@ -2,7 +2,7 @@
 
 `syno`, a command-line tool for a Synology NAS (DSM 7) and, optionally, an SRM router. Container Manager, packages, security audit, shares and snapshots, backups, storage health, and a raw escape hatch to any DSM Web API endpoint.
 
-Every command prints JSON on stdout, so you can pipe it straight to `jq`. The DSM call trace goes to stderr. Exit 0 on success, 1 on failure, 2 on a usage error.
+Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the DSM API trace. Exit 0 on success, 1 on failure, 2 on a usage error.
 
 ## Install
 
@@ -26,7 +26,7 @@ Required:
 
 The account must be in the `administrators` group. DSM 7 gates its admin APIs on that membership and offers no selective grant.
 
-Every secret also accepts a `*_FILE` form (`DSM_PASSWORD_FILE`, `DSM_TOTP_SECRET_FILE`) naming a file to read it from. Setting both forms of the same secret is refused. Symlinks are refused. How the value gets there is up to you: a 0600 file, a plain export, or a launcher like `op run` or sops. There's no built-in secret-manager dependency.
+Every secret also accepts a `*_FILE` form (`DSM_PASSWORD_FILE`, `DSM_TOTP_SECRET_FILE`) naming a file to read it from. Setting both forms of the same secret is refused. Symlinks are refused. How the value gets there is up to you: a 0600 file, a plain export, or a secret-manager launcher. There's no built-in secret-manager dependency.
 
 Optional:
 

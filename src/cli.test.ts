@@ -30,6 +30,7 @@ test("exit: help is 0 and prints the full help to stdout", () => {
   assert.equal(r.code, 0);
   // The last help line must be present — proof stdout wasn't truncated on exit.
   assert.match(r.stdout, /string params need JSON quotes/);
+  assert.match(r.stdout, /--verbose/);
 });
 
 test("exit: --version is 0", () => {
