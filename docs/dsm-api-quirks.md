@@ -24,6 +24,51 @@ DSM error codes are NOT what they sound like — verified against [N4S4/synology
 - **POST is required for state-changing calls.** GET often yields 503 / "fetch failed" mid-flight. Set `post: true` on `SynologyCallOptions`.
 - **DSM frequently drops the TCP connection mid-execution on state changes** (`Package.Control.stop`, `Project.build`, etc.). The action still completes server-side. Catch network-level errors (`fetch failed` / `ECONNRESET` / `ETIMEDOUT` / `socket hang up`) and verify via a status-poll instead of bailing.
 
+## Provisional network API observations
+
+These shapes were observed in DSM 7 Network UI traffic. They are notes for
+`syno raw`, not supported named-command contracts.
+
+### Automatic IPv6 on one interface
+
+Read interfaces with `SYNO.Core.Network.Ethernet` v2 `list`. Each observed row
+included `ifname` and an `ipv6` array. Address presence does not identify the
+configured IPv6 mode, so this observation cannot safely change an interface
+that already has an IPv6 address.
+
+The UI sent `SYNO.Entry.Request` v1 `request` as a POST with this parameter
+object. `syno raw --params-json` applies the required top-level wire quoting:
+
+```json
+{
+  "stop_when_error": false,
+  "mode": "sequential",
+  "compound": [
+    {
+      "api": "SYNO.Core.Network.IPv6",
+      "method": "set",
+      "version": 1,
+      "ifname": "INTERFACE",
+      "type": "auto",
+      "is_default_gateway": false,
+      "force": true
+    },
+    {
+      "api": "SYNO.Core.Network.IPv6.Router",
+      "method": "set",
+      "version": 1,
+      "type": "off",
+      "config": { "wan": "INTERFACE" }
+    }
+  ]
+}
+```
+
+The observed response had `has_fail: false` and two results with
+`success: true`. Re-read the Ethernet list after the write and require a
+nonempty `ipv6` array on the selected interface. A transport failure is
+ambiguous, so verify state instead of repeating the write.
+
 ## Response shape
 
 The biggest footgun: where `additional[]` keys appear in the response varies by API.
