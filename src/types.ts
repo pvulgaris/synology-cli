@@ -1,7 +1,6 @@
 /**
- * Shared output shapes for the update-availability tools and the digest, plus the
- * OS-update response mapper. Dependency-free (no imports) so callers can use these
- * without pulling in a `tools/` module's graph, so `tools/srm.ts` and
+ * Shared output shape for the update-availability commands, plus the OS-update
+ * response mapper. Dependency-free (no imports) so `tools/srm.ts` and
  * `tools/updates.ts` can both use `mapOsUpdate` without importing each other.
  */
 
@@ -20,39 +19,6 @@ export interface OsUpdateStatus {
    *  response-shape mismatch), or the current-version read failed. Surfaced so a
    *  parse problem is visible instead of silently reading as "up to date". */
   warning?: string;
-}
-
-/** One pending update — an OS bump or a package bump, on the NAS or the router. */
-export interface ComponentUpdate {
-  device: "nas" | "router";
-  component: "os" | "package";
-  /** "DSM"/"SRM" for os; package id for package. */
-  id: string;
-  name: string;
-  installed_version: string | null;
-  available_version: string;
-  changelog?: string;
-  changelog_url?: string;
-}
-
-/** Per-source outcome. `ok:false` is a real failure (device down, API error).
- *  `note` carries a non-error explanation (e.g. router not configured). */
-export interface SourceResult {
-  source: "nas_os" | "nas_packages" | "router_os" | "router_packages";
-  ok: boolean;
-  error?: string;
-  note?: string;
-  updates: ComponentUpdate[];
-}
-
-/** Aggregated result across all four sources — the `synology_update_digest`
- *  tool's output. `pending` is the flattened union of everything available. */
-export interface UpdateDigest {
-  generated_at: string;
-  total_pending: number;
-  any_errors: boolean;
-  sources: SourceResult[];
-  pending: ComponentUpdate[];
 }
 
 /** Map a DSM/SRM `SYNO.Core.Upgrade.Server check` response into OsUpdateStatus.

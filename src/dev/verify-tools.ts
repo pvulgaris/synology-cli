@@ -29,9 +29,8 @@ async function main(): Promise<void> {
       command.name !== "raw" &&
       (command.args?.length ?? 0) === 0 &&
       (target
-        ? command.scope !== "aggregate" && command.platforms.includes(target)
-        : command.scope === "aggregate" ||
-          command.platforms.some((platform) => configured.has(platform))) &&
+        ? command.platforms.includes(target)
+        : command.platforms.some((platform) => configured.has(platform))) &&
       (!filter || command.name === filter)
   );
   if (filter && eligible.length === 0) {
@@ -42,25 +41,15 @@ async function main(): Promise<void> {
   for (const command of eligible) {
     console.error(`\n=== ${command.name} ===`);
     try {
-      let output: unknown;
-      if (command.scope === "aggregate") {
-        const clients: Partial<Record<Platform, SynoClient>> = {};
-        for (const platform of command.platforms) {
-          const config = tryLoadTarget(platform);
-          if (config) clients[platform] = new SynoClient(config);
-        }
-        output = await command.run({ runtime, clients, args: [], flags });
-      } else {
-        const platform = selectPlatform(command, flags);
-        const config = loadTarget(platform);
-        output = await command.run({
-          runtime,
-          target: config,
-          client: new SynoClient(config),
-          args: [],
-          flags,
-        });
-      }
+      const platform = selectPlatform(command, flags);
+      const config = loadTarget(platform);
+      const output = await command.run({
+        runtime,
+        target: config,
+        client: new SynoClient(config),
+        args: [],
+        flags,
+      });
       console.log(JSON.stringify(output, null, 2));
     } catch (err) {
       failures++;

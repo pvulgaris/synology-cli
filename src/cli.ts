@@ -11,7 +11,7 @@
  * Each command loads only its selected DSM or SRM target and credentials.
  */
 
-import { loadRuntimeConfig, loadTarget, tryLoadTarget } from "./config.js";
+import { loadRuntimeConfig, loadTarget } from "./config.js";
 import { SynoClient } from "./client.js";
 import {
   COMMANDS,
@@ -104,28 +104,18 @@ async function main(): Promise<Outcome> {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
   const verbose = flags.verbose === true || flags.verbose === "true";
-  let result: unknown;
-  if (command.scope === "aggregate") {
-    const clients: Partial<Record<"dsm" | "srm", SynoClient>> = {};
-    for (const platform of command.platforms) {
-      const target = tryLoadTarget(platform);
-      if (target) clients[platform] = new SynoClient(target, { verbose });
+  const platform = selectPlatform(command, flags);
+  let target;
+  try {
+    target = loadTarget(platform);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Missing required env:")) {
+      throw new UsageError(err.message);
     }
-    result = await command.run({ runtime, clients, args, flags });
-  } else {
-    const platform = selectPlatform(command, flags);
-    let target;
-    try {
-      target = loadTarget(platform);
-    } catch (err) {
-      if (err instanceof Error && err.message.startsWith("Missing required env:")) {
-        throw new UsageError(err.message);
-      }
-      throw err;
-    }
-    const client = new SynoClient(target, { verbose });
-    result = await command.run({ runtime, target, client, args, flags });
+    throw err;
   }
+  const client = new SynoClient(target, { verbose });
+  const result = await command.run({ runtime, target, client, args, flags });
   return { code: 0, stdout: JSON.stringify(result, null, 2) };
 }
 

@@ -44,8 +44,12 @@ Each target's session is cached independently under `~/.local/state/syno/` so ba
 ## Commands
 
 `syno --help` lists commands for people. `syno help --json` returns the same
-registry with arguments, flags, supported platforms, mutation status, and scope
-for agents. The registry is the command inventory; it is not duplicated here.
+registry with arguments, flags, supported platforms, and mutation status for
+agents. The registry is the command inventory; it is not duplicated here.
+
+Each command runs against one device. Nothing fans out across both, so a
+question spanning the NAS and the router is answered by composing commands and
+merging their JSON.
 
 ## Writes require `--yes`
 

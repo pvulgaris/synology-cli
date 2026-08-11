@@ -9,8 +9,8 @@
  * The router client is constructed read-only (see SynoClient).
  *
  * The only named operation here checks for an SRM OS update. SRM exposes no
- * package-update API, so the aggregate digest reports that capability without
- * probing a known-absent endpoint.
+ * package-update API (`SYNO.Core.Package.Server` returns 103), so there is no
+ * router package command to sit beside it.
  *
  * Detection only — no SRM writes (the router login uses a dedicated SRM admin
  * credential; a bricked router would also drop this very connection).

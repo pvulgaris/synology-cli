@@ -118,19 +118,23 @@ test("output: the result goes to stdout, diagnostics to stderr", () => {
   assert.equal(r.stderr, "");
 });
 
-test("verify: an unscoped run skips unconfigured targets", () => {
+test("verify: an unscoped run selects only the configured target's commands", () => {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith("DSM_") || key.startsWith("SRM_")) delete env[key];
   }
+  // Unreachable on purpose: selection is what's under test, so each command is
+  // expected to print its header and then fail to connect.
+  env.SRM_BASE_URL = "https://127.0.0.1:9";
+  env.SRM_PASSWORD = "x";
+  env.SRM_TOTP_SECRET = "JBSWY3DPEHPK3PXP";
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", VERIFY],
     { encoding: "utf8", env }
   );
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /=== updates ===/);
-  assert.doesNotMatch(result.stderr, /=== status ===|=== router update-check ===/);
+  assert.match(result.stderr, /=== router update-check ===/);
+  assert.doesNotMatch(result.stderr, /=== status ===|=== packages list ===/);
 });
 
 test("SRM-only commands authenticate and run without DSM configuration", async () => {

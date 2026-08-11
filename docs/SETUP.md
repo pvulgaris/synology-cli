@@ -65,7 +65,7 @@ The first run writes a session file to `~/.local/state/syno/`, so subsequent com
 
 ## 5. Optional: DSM notification email
 
-DSM → Control Panel → Notification → Email. DSM then emails you when packages have updates, which is a useful backstop to `syno updates`.
+DSM → Control Panel → Notification → Email. DSM then emails you when packages have updates, which is a useful backstop to `syno packages updates`.
 
 ## Uninstall
 
