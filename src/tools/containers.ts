@@ -134,13 +134,12 @@ async function listProjectsRaw(
   });
 }
 
-async function resolveProject(
-  dsm: SynoClient,
-  nameOrId: string
-): Promise<{ id: string; summary: ProjectSummaryWire }> {
+/** Resolve a name or id to the live project id. Only the id is returned: the
+ *  list entry's fields are all re-read by `Project.get`, so keeping it would be
+ *  a pre-stop snapshot that the detail read overwrites anyway. */
+async function resolveProjectId(dsm: SynoClient, nameOrId: string): Promise<string> {
   const projects = await listProjectsRaw(dsm);
-  const byId = projects[nameOrId];
-  if (byId) return { id: nameOrId, summary: byId };
+  if (projects[nameOrId]) return nameOrId;
   const matches = Object.entries(projects).filter(
     ([, project]) => project.name === nameOrId || project.id === nameOrId
   );
@@ -150,22 +149,17 @@ async function resolveProject(
   if (matches.length > 1) {
     throw new Error(`Container Manager project name "${nameOrId}" is ambiguous; use its id.`);
   }
-  return { id: matches[0][0], summary: matches[0][1] };
+  return matches[0][0];
 }
 
 export async function nasContainerProjectInfo(
   dsm: SynoClient,
   nameOrId: string
 ): Promise<ProjectState> {
-  const { id, summary } = await resolveProject(dsm, nameOrId);
-  return projectInfoById(dsm, id, summary);
+  return projectInfoById(dsm, await resolveProjectId(dsm, nameOrId));
 }
 
-async function projectInfoById(
-  dsm: SynoClient,
-  id: string,
-  summary: ProjectSummaryWire
-): Promise<ProjectState> {
+async function projectInfoById(dsm: SynoClient, id: string): Promise<ProjectState> {
   const detail = await dsm.call<ProjectSummaryWire>({
     api: "SYNO.Docker.Project",
     method: "get",
@@ -173,7 +167,7 @@ async function projectInfoById(
     params: { id: JSON.stringify(id) },
     sensitiveResponse: true,
   });
-  return normalizeProject({ ...summary, ...detail }, id, detail.containers);
+  return normalizeProject(detail, id, detail.containers);
 }
 
 export async function nasContainerProjectsList(dsm: SynoClient) {
@@ -375,12 +369,11 @@ function projectReady(project: ProjectState): boolean {
 async function waitForProject(
   dsm: SynoClient,
   projectId: string,
-  summary: ProjectSummaryWire,
   predicate: (state: ProjectState) => boolean,
   timeoutMs: number
 ): Promise<ProjectState> {
   return poll({
-    read: () => projectInfoById(dsm, projectId, summary),
+    read: () => projectInfoById(dsm, projectId),
     done: predicate,
     intervalMs: PROJECT_POLL_MS,
     timeoutMs,
@@ -420,8 +413,8 @@ export async function nasContainerProjectDeploy(
   const content = await fs.readFile(args.file, "utf8");
   if (content.trim().length === 0) throw new Error(`Compose file "${args.file}" is empty.`);
   const composeSha256 = createHash("sha256").update(content).digest("hex");
-  const resolved = await resolveProject(dsm, args.project);
-  const before = await projectInfoById(dsm, resolved.id, resolved.summary);
+  const projectId = await resolveProjectId(dsm, args.project);
+  const before = await projectInfoById(dsm, projectId);
   const failure = `Project "${before.name}" did not reach a ready state after build.`;
 
   const { after, ok } = await withAudit(
@@ -433,12 +426,11 @@ export async function nasContainerProjectDeploy(
     },
     async (audit) => {
       if (before.containers?.some((container) => container.running)) {
-        const stopError = await projectMutation(dsm, resolved.id, "stop");
+        const stopError = await projectMutation(dsm, projectId, "stop");
         if (stopError) audit.stop_error = stopError;
         const stopped = await waitForProject(
           dsm,
-          resolved.id,
-          resolved.summary,
+          projectId,
           (state) => !(state.containers ?? []).some((container) => container.running),
           PROJECT_STOP_TIMEOUT_MS
         );
@@ -453,16 +445,15 @@ export async function nasContainerProjectDeploy(
         method: "update",
         version: 1,
         post: true,
-        params: { id: JSON.stringify(resolved.id), content: JSON.stringify(content) },
+        params: { id: JSON.stringify(projectId), content: JSON.stringify(content) },
         sensitiveResponse: true,
       });
 
-      const buildError = await projectMutation(dsm, resolved.id, "build");
+      const buildError = await projectMutation(dsm, projectId, "build");
       if (buildError) audit.build_error = buildError;
       const state = await waitForProject(
         dsm,
-        resolved.id,
-        resolved.summary,
+        projectId,
         projectReady,
         PROJECT_BUILD_TIMEOUT_MS
       );
