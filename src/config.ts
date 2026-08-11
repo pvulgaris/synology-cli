@@ -58,16 +58,24 @@ export function loadRuntimeConfig(): RuntimeConfig {
   };
 }
 
+/** The variable whose presence decides whether a target is configured at all. */
+export function baseUrlEnvName(platform: Platform): string {
+  return `${PLATFORMS[platform].envPrefix}_BASE_URL`;
+}
+
 /** Load one target without inspecting configuration for the other platform. */
 export function loadTarget(platform: Platform): TargetConfig {
   const defaults = PLATFORMS[platform];
-  const baseUrlName = `${defaults.envPrefix}_BASE_URL`;
-  const baseUrl = envValue(baseUrlName);
-  if (!baseUrl) throw new Error(`Missing required env: ${baseUrlName}`);
+  const baseUrlName = baseUrlEnvName(platform);
+  const configured = envValue(baseUrlName);
+  if (!configured) throw new Error(`Missing required env: ${baseUrlName}`);
+  // Both spellings address one device, so both must resolve to one session file.
+  // A second login inside the window that minted the first SID is rejected.
+  const baseUrl = configured.replace(/\/$/, "");
   const user = envValue(`${defaults.envPrefix}_USER`) ?? "claude-mcp";
   return {
     platform,
-    baseUrl: baseUrl.replace(/\/$/, ""),
+    baseUrl,
     user,
     envPrefix: defaults.envPrefix,
     session: defaults.session,
@@ -82,6 +90,5 @@ export function loadTarget(platform: Platform): TargetConfig {
 
 /** Return null only when the target is not configured. Invalid target config fails. */
 export function tryLoadTarget(platform: Platform): TargetConfig | null {
-  const prefix = PLATFORMS[platform].envPrefix;
-  return envValue(`${prefix}_BASE_URL`) ? loadTarget(platform) : null;
+  return envValue(baseUrlEnvName(platform)) ? loadTarget(platform) : null;
 }
