@@ -70,6 +70,18 @@ test("tryLoadTarget returns null only when that target is absent", () => {
   });
 });
 
+test("a trailing slash addresses the same target, so it shares the session", () => {
+  let withSlash = "";
+  let without = "";
+  withEnv({ DSM_BASE_URL: "https://nas.test:5001/", DSM_SID_CACHE_FILE: undefined }, () => {
+    withSlash = loadTarget("dsm").sidCacheFile;
+  });
+  withEnv({ DSM_BASE_URL: "https://nas.test:5001", DSM_SID_CACHE_FILE: undefined }, () => {
+    without = loadTarget("dsm").sidCacheFile;
+  });
+  assert.equal(withSlash, without);
+});
+
 test("runtime configuration does not require a device", () => {
   withEnv(
     {
