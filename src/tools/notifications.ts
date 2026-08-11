@@ -30,6 +30,16 @@ export async function nasNotifications(dsm: SynoClient) {
   const v2 = await getMailConf(2);
   const selected = usable(v2.value) ? v2 : await getMailConf(1);
   const mail = selected.value;
+  // Whatever came back is still rendered: a payload can fail `usable` and yet
+  // carry the SMTP fields an audit reads. A bare `success` raises no read error,
+  // so without this warning it is indistinguishable from mail being off.
+  const warnings = usable(mail) ? [] : readWarnings([v2, selected]);
+  if (!usable(mail) && warnings.length === 0) {
+    warnings.push({
+      source: selected.source,
+      error: "SYNO.Core.Notification.Mail.Conf returned no usable config.",
+    });
+  }
   // Recipients live in `profiles` on DSM 7.3 (target_type "mail"), in the flat
   // `mail` array pre-7.3. Prefer the authoritative address `target_config.mail`
   // over the `target_name` display label (a profile can be named "Home Alert");
@@ -67,6 +77,6 @@ export async function nasNotifications(dsm: SynoClient) {
           in_use: mail.in_use ?? null,
         }
       : null,
-    warnings: mail ? [] : readWarnings([v2, selected]),
+    warnings,
   };
 }
