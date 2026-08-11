@@ -33,6 +33,40 @@ Use `--` to stop flag parsing when a DSM param name collides with a CLI flag: `s
 
 Prefer a named command when one exists. Reach for `raw` to explore a new endpoint or to answer a one-off question, and read `docs/dsm-api-quirks.md` first. Most surprising `code:` errors are documented there. `raw` also gates non-read method names even when they use GET, because DSM does not consistently align mutation with POST.
 
+## Provisional automatic IPv6 workflow
+
+Use this only when the user asks to set one DSM interface to automatic IPv6.
+The API shape is an observation recorded in `docs/dsm-api-quirks.md`, not a
+general network-settings contract. Do not adapt it to static addresses,
+gateways, bonds, VLANs, or other modes.
+
+1. Read the current interfaces:
+   ```sh
+   syno raw SYNO.Core.Network.Ethernet list --version=2
+   ```
+2. Select the exact `ifname`. Stop if it is absent or its `ipv6` array is
+   nonempty because this read does not identify the configured mode.
+3. Render this confirmation block and wait for a literal `yes`:
+   ```text
+   Update proposed:
+     interface: <ifname>
+     action:    set IPv6 configuration to automatic
+     before:    no IPv6 address observed
+     after:     IPv6 address assigned automatically
+   Confirm? (yes/no)
+   ```
+4. Read the **Automatic IPv6 on one interface** section in
+   `docs/dsm-api-quirks.md`. Replace both `INTERFACE` values in its parameter
+   object with the verified `ifname`, then pass that object as `<JSON>`:
+   ```sh
+   syno raw SYNO.Entry.Request request --version=1 --post --yes --params-json='<JSON>'
+   ```
+5. Re-read `SYNO.Core.Network.Ethernet` v2 `list`. Report success only when the
+   selected interface has a nonempty `ipv6` array. If the write reports a
+   transport failure, still perform this read because the change may have
+   completed. If the address remains absent, report the result as unverified
+   and do not repeat the write.
+
 ## Write flow
 
 Writes need `--yes` on the command line. Nothing prompts you, so the confirmation gate is yours to run. **No silent writes, no batched writes across multiple packages in one turn.**
