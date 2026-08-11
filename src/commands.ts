@@ -39,7 +39,7 @@ import { nasSharesList } from "./tools/shares.js";
 import { nasExternalAccess } from "./tools/external.js";
 import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
-import { nasDsmOsCheckUpdate, synologyUpdateDigest } from "./tools/updates.js";
+import { nasDsmOsCheckUpdate } from "./tools/updates.js";
 import { routerSrmOsCheckUpdate } from "./tools/srm.js";
 import {
   nasHyperbackupTasks,
@@ -89,7 +89,6 @@ export interface Command {
   /** Optional trailing positional values, used by raw k=v parameters. */
   variadic?: string;
   flags?: Readonly<Record<string, FlagSpec>>;
-  scope?: "target";
   /**
    * Mutating commands require an explicit --yes because the CLI does not prompt.
    */
@@ -97,19 +96,7 @@ export interface Command {
   run(ctx: CommandContext): Promise<unknown>;
 }
 
-export interface AggregateCommandContext {
-  runtime: RuntimeConfig;
-  clients: Partial<Record<Platform, SynoClient>>;
-  args: string[];
-  flags: Record<string, string | true>;
-}
-
-export interface AggregateCommand extends Omit<Command, "scope" | "run"> {
-  scope: "aggregate";
-  run(ctx: AggregateCommandContext): Promise<unknown>;
-}
-
-export type RegisteredCommand = Command | AggregateCommand;
+export type RegisteredCommand = Command;
 
 type FlagType = "boolean" | "string" | "integer";
 export type FlagSpec =
@@ -126,7 +113,7 @@ function commandFlags(
   return {
     verbose: "boolean",
     ...(command.mutating || command.name === "raw" ? { yes: "boolean" as const } : {}),
-    ...(command.scope !== "aggregate" && command.platforms.length > 1
+    ...(command.platforms.length > 1
       ? { target: { type: "string" as const, value: "dsm|srm" } }
       : {}),
     ...(command.flags ?? {}),
@@ -431,15 +418,6 @@ export const COMMANDS: RegisteredCommand[] = [
 
   // ── Updates ───────────────────────────────────────────────────────────────
   {
-    name: "updates",
-    summary:
-      "Aggregated pending updates across DSM OS, NAS packages, router OS, and router packages, in one result.",
-    platforms: SYNOLOGY,
-    scope: "aggregate",
-    run: ({ clients }) =>
-      synologyUpdateDigest(clients.dsm ?? null, clients.srm ?? null),
-  },
-  {
     name: "dsm update-check",
     summary: "Whether a DSM OS update is available (read-only; does not download or apply).",
     platforms: DSM,
@@ -625,7 +603,6 @@ export function commandManifest() {
     summary: command.summary,
     usage: commandUsage(command),
     platforms: command.platforms,
-    scope: command.scope ?? "target",
     mutating: command.mutating ?? false,
     args: command.args ?? [],
     variadic: command.variadic ?? null,

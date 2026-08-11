@@ -1,34 +1,11 @@
 /**
- * Unit coverage for the OS-update mapper and the cross-device digest — the
- * branches a live NAS+router can't exercise on demand (you can't manufacture a
- * pending update, a device-down error, or a not-configured router against real
- * hardware). The happy-path digest fake mirrors the shape verified live on
- * 2026-06-26 (SRM 1.3.1 → 1.3.2 detected, NAS clean), so it doubles as a
- * regression lock on that result.
- *
- * Pure + deterministic: every function routes its DSM/SRM I/O through
- * `client.call`, so one stubbed method per client covers the whole flow.
+ * Unit coverage for the OS-update mapper — the response shapes a live NAS or
+ * router can't be made to produce on demand (you can't manufacture a pending
+ * update, and DSM and SRM disagree on where the result nests).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { SynoClient, SynologyCallOptions } from "../client.js";
 import { mapOsUpdate } from "../types.js";
-import { synologyUpdateDigest } from "./updates.js";
-
-/** Build a fake client from `api.method` → handler. A handler that throws makes
- *  `call` reject (simulating a DSM error / device down); a missing key throws an
- *  explicit "unexpected" so a drifting call shape fails loud, not silently. */
-function fakeClient(handlers: Record<string, (params: Record<string, unknown>) => unknown>): SynoClient {
-  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
-    const key = `${opts.api}.${opts.method}`;
-    const h = handlers[key];
-    if (!h) throw new Error(`unexpected DSM call: ${key}`);
-    return h((opts.params ?? {}) as Record<string, unknown>);
-  };
-  return { call } as unknown as SynoClient;
-}
-
-// ── mapOsUpdate ─────────────────────────────────────────────────────────────
 
 test("mapOsUpdate: DSM nests the result under `update`", () => {
   const o = mapOsUpdate(
@@ -105,75 +82,3 @@ test("mapOsUpdate: stringy reboot 'false' is false, not Boolean('false')===true"
   assert.equal(o.reboot_required, false);
 });
 
-// ── synologyUpdateDigest ─────────────────────────────────────────────────────────
-
-/** NAS fake with nothing pending: clean DSM OS check, installed == catalog. */
-function cleanNas(): SynoClient {
-  return fakeClient({
-    "SYNO.Core.System.info": () => ({ firmware_ver: "DSM 7.2.2-72806" }),
-    "SYNO.Core.Upgrade.Server.check": () => ({ available: false }),
-    "SYNO.Core.Package.list": () => ({ packages: [{ id: "HyperBackup", name: "Hyper Backup", version: "3.0.0-2000" }] }),
-    "SYNO.Core.Package.Server.list": () => ({ packages: [{ id: "HyperBackup", name: "Hyper Backup", version: "3.0.0-2000" }] }),
-  });
-}
-
-test("digest: four sources assemble; a real SRM OS update lands in pending", { timeout: 3000 }, async () => {
-  const router = fakeClient({
-    "SYNO.Core.System.info": () => ({ firmware_ver: "SRM 1.3.1-9346 Update 13" }),
-    "SYNO.Core.Upgrade.Server.check": () => ({ available: true, version: "SRM 1.3.2-9366" }),
-  });
-
-  const d = await synologyUpdateDigest(cleanNas(), router);
-
-  assert.equal(d.sources.length, 4);
-  assert.equal(d.any_errors, false);
-  assert.equal(d.total_pending, 1);
-  assert.equal(d.pending.length, 1);
-  assert.deepEqual(d.pending[0], {
-    device: "router",
-    component: "os",
-    id: "SRM",
-    name: "SRM (router)",
-    installed_version: "SRM 1.3.1-9346 Update 13",
-    available_version: "SRM 1.3.2-9366",
-    changelog_url: undefined,
-  });
-  const byName = Object.fromEntries(d.sources.map((s) => [s.source, s]));
-  assert.equal(byName.router_os.ok, true);
-  assert.equal(byName.router_packages.ok, true); // degraded, not errored
-  // The "no package-update API" note must survive into the digest (not be dropped),
-  // else router_packages reads as "all current" — false reassurance.
-  assert.match(byName.router_packages.note ?? "", /no package-update API/i);
-  assert.equal(byName.nas_os.ok, true);
-  assert.equal(byName.nas_packages.ok, true);
-});
-
-test("digest: one device down ⇒ that source ok:false, others still report", { timeout: 3000 }, async () => {
-  const router = fakeClient({
-    "SYNO.Core.System.info": () => { throw new Error("router unreachable"); },
-    "SYNO.Core.Upgrade.Server.check": () => { throw new Error("DSM login failed (code 404)"); },
-  });
-
-  const d = await synologyUpdateDigest(cleanNas(), router);
-
-  assert.equal(d.any_errors, true);
-  const byName = Object.fromEntries(d.sources.map((s) => [s.source, s]));
-  assert.equal(byName.router_os.ok, false);
-  assert.match(byName.router_os.error ?? "", /404/);
-  assert.equal(byName.router_packages.ok, true); // static capability, no failed probe
-  // The NAS sources are unaffected — one device down doesn't abort the rest.
-  assert.equal(byName.nas_os.ok, true);
-  assert.equal(byName.nas_packages.ok, true);
-});
-
-test("digest: no router configured ⇒ router sources noted, not errored", { timeout: 3000 }, async () => {
-  const d = await synologyUpdateDigest(cleanNas(), null);
-
-  assert.equal(d.sources.length, 4);
-  assert.equal(d.any_errors, false);
-  assert.equal(d.total_pending, 0);
-  const byName = Object.fromEntries(d.sources.map((s) => [s.source, s]));
-  assert.equal(byName.router_os.ok, true);
-  assert.equal(byName.router_os.note, "router not configured");
-  assert.equal(byName.router_packages.note, "router not configured");
-});

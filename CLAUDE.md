@@ -8,7 +8,7 @@ Onboarding for a future Claude session (or any human collaborator). What's here 
 
 `src/commands.ts` is authoritative for dispatch, strict input validation, supported platforms, `--help`, and `syno help --json`. The README and skill point agents to that manifest instead of duplicating the inventory. [Issue #31](https://github.com/pvulgaris/synology-cli/issues/31) records the modernization design and completion criteria.
 
-Resolve and validate a command before loading target configuration or credentials. An ordinary handler receives one target and one client. An aggregate command loads each configured target explicitly and reports source failures independently.
+Resolve and validate a command before loading target configuration or credentials. Every handler receives exactly one target and one client. There is deliberately no command that fans out across both devices: a cross-device digest existed and was removed, because it merged updates you can apply with updates that are detection-only, and it needed a second dispatch path whose "nothing configured" case reported success. Compose the per-target commands instead.
 
 Response shapes are deliberately frozen. `skills/synology/SKILL.md` maps audit findings to specific fields (`firewall_enabled`, `web_hardening.https_redirect`, `smb.min_protocol`), so reshaping a tool's output silently breaks those rules.
 
@@ -73,7 +73,7 @@ SRM is independent of DSM. An SRM-only command loads only `SRM_*`, so it works w
 - The target is **read-only** at the `SynoClient` level. Authentication path, version, credential prefix, session, and policy are fields on `TargetConfig`. The generic client in `client.ts` has no DSM/SRM construction branch.
 - SRM's package and upgrade reads are admin-gated with no selective grant, so `SRM_USER` must be an admin. SRM does support extra admins (Control Panel → User → "Grant administrator privilege"; the widely-cited "primary admin only" claim is pre-1.3), so use a dedicated account. A Normal user gets code 402 at login.
 - **Verified live (SRM 1.3.1 / RT6600ax, 2026-06-26):** router login is at `auth.cgi` with `SYNO.API.Auth` **v3** (DSM's `entry.cgi`/v6 returns 102); SRM reuses `SYNO.Core.Upgrade.Server check` v1 and returns DSM's flat `{available, version}` shape, with `current_version` from `SYNO.Core.System info` at **v1** (v3 is DSM-only, 104s on SRM); SRM's admin-gated reads don't need `enable_syno_token`.
-- **SRM has no package-update API.** `SYNO.Core.Package.Server` returns 103, so there is deliberately no `router packages updates` command. The `syno updates` digest carries that as an honest note on its `router_packages` source instead.
+- **SRM has no package-update API.** `SYNO.Core.Package.Server` returns 103, so there is deliberately no `router packages updates` command. Its absence from `syno help --json` is the statement; don't add a command that returns an empty list.
 - OS detection is detect-only. Applying DSM or SRM updates stays deferred (brick risk). `mapOsUpdate` only reports `available:true` when a concrete version is named, biasing to silence over crying wolf.
 
 ## DSM API quirks (the consolidated cheatsheet)
