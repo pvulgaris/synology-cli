@@ -150,6 +150,25 @@ test("project reads resolve a name and omit Compose content", async () => {
   assert.equal((info as any).content, undefined);
 });
 
+test("project detail is the only source; the list entry just resolves the id", async () => {
+  // The list entry is read before any stop or build, so reporting a field from it
+  // would present a stale snapshot as the live state. Project.get returns every
+  // field the result carries, so the entry is only needed to turn a name into an id.
+  const dsm = {
+    call: async (opts: any) => {
+      if (opts.method === "list") {
+        return { id1: { id: "id1", name: "demo", status: "STOPPED", containerIds: ["one"] } };
+      }
+      return { id: "id1", name: "demo", containers: [] };
+    },
+  } as any;
+
+  const info = await nasContainerProjectInfo(dsm, "demo");
+
+  assert.equal(info.id, "id1");
+  assert.equal(info.status, undefined);
+});
+
 test("project deploy stops, updates, builds, verifies, and never audits Compose content", async () => {
   const dir = mkdtempSync(join(tmpdir(), "syno-container-deploy-"));
   const file = join(dir, "compose.yaml");
