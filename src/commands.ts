@@ -59,6 +59,21 @@ import {
 } from "./tools/containers.js";
 import { withAudit } from "./audit.js";
 
+/** Raw calls observed to use write-shaped method names or POST for read-only
+ * work. Keep these exceptions endpoint-specific so unknown DSM APIs retain the
+ * conservative confirmation gate. */
+const RAW_READ_ONLY_CALLS = new Set([
+  "SYNO.Virtualization.Guest.check_availability",
+  "SYNO.Virtualization.Guest.gen_mac",
+  "SYNO.Virtualization.Guest.list_resource",
+  "SYNO.Virtualization.Guest.read_ovf",
+]);
+
+function rawCallMayMutate(api: string, method: string, post: boolean): boolean {
+  if (RAW_READ_ONLY_CALLS.has(`${api}.${method}`)) return false;
+  return post || methodMayMutate(method);
+}
+
 /** A bad invocation (missing arg, unknown value, malformed param) as opposed to a
  *  runtime/API failure. The top-level catch maps this to exit 2, keeping the
  *  documented "2 on a usage error" contract instead of collapsing everything to 1. */
@@ -479,9 +494,10 @@ export const COMMANDS: RegisteredCommand[] = [
         (api === "SYNO.Docker.Project" && ["create", "get", "update"].includes(method));
       const call = () =>
         ctx.client.call({ api, method, version, post, params, sensitiveResponse });
-      // DSM has mutating endpoints that use GET, so method semantics join the
-      // transport in deciding whether this call needs the audit trail.
-      if (!post && !methodMayMutate(method)) return call();
+      // DSM has mutating endpoints that use GET and read-only endpoints that
+      // use POST, so the API, method, and transport jointly decide whether this
+      // call needs the audit trail.
+      if (!rawCallMayMutate(api, method, post)) return call();
       let result: unknown;
       return withAudit(
         ctx.runtime,
@@ -629,7 +645,7 @@ export function requiresConfirmation(
   if (command.mutating) return true;
   if (command.name !== "raw") return false;
   const post = flags.post === true || flags.post === "true";
-  return post || (args[1] ? methodMayMutate(args[1]) : false);
+  return args[0] && args[1] ? rawCallMayMutate(args[0], args[1], post) : post;
 }
 
 /**

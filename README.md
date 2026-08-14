@@ -53,7 +53,7 @@ merging their JSON.
 
 ## Writes require `--yes`
 
-Any command marked **write** refuses to run without `--yes`. So does `syno raw` for POST or a method outside its read allowlist.
+Any command marked **write** refuses to run without `--yes`. So does `syno raw` for POST or a method outside its read allowlist, except for endpoint-specific calls verified as read-only.
 
 ```sh
 syno packages update SynologyDrive --yes
@@ -78,7 +78,7 @@ syno raw SYNO.Core.System info --target=srm --params-json='{}'
 
 `--params-json` handles Synology's wire quoting for strings, booleans, numbers, arrays, and objects. The trailing `k=v` form remains available for direct wire values. Do not combine the two forms.
 
-`raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. Synology has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary. SRM's target policy refuses every mutation even with `--yes`.
+`raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. Endpoint-specific exceptions cover calls verified as read-only. Synology has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary. SRM's target policy refuses every mutation even with `--yes`.
 
 See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, response shapes, and known API names.
 

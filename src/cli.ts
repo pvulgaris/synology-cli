@@ -52,7 +52,7 @@ function helpText(): string {
   }
   lines.push(
     "",
-    "Write commands require --yes. `raw` also requires it for POST or any non-read method.",
+    "Write commands require --yes. `raw` also requires it for POST or any non-read method unless the endpoint is known to be read-only.",
     "",
     "Every command prints JSON on stdout; progress and errors go to stderr.",
     "Use --verbose to add the Synology API trace to stderr.",

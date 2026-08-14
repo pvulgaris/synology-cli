@@ -153,6 +153,30 @@ test("gate: raw read methods are free but POST is gated", () => {
   assert.equal(requiresConfirmation(raw, { post: true }), true);
 });
 
+test("gate: known read-only VMM discovery calls do not require confirmation", () => {
+  const raw = byName("raw");
+  for (const method of ["list_resource", "check_availability", "gen_mac"]) {
+    assert.equal(
+      requiresConfirmation(raw, {}, ["SYNO.Virtualization.Guest", method]),
+      false,
+      method
+    );
+  }
+  assert.equal(
+    requiresConfirmation(
+      raw,
+      { post: true },
+      ["SYNO.Virtualization.Guest", "read_ovf"]
+    ),
+    false
+  );
+  assert.equal(
+    requiresConfirmation(raw, {}, ["SYNO.Other.Api", "gen_mac"]),
+    true,
+    "the exception must remain scoped to the observed VMM API"
+  );
+});
+
 test("gate: raw mutating methods require confirmation even when DSM uses GET", () => {
   const raw = byName("raw");
   assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Image", "delete"]), true);
@@ -240,6 +264,18 @@ test("usage: a malformed raw param throws UsageError", async () => {
 test("raw GET is a read and writes no audit record", async () => {
   const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
   await cmd("raw").run(ctx({ auditDir, args: ["SYNO.Core.System", "info"] }));
+  assert.deepEqual(auditLines(auditDir), []);
+});
+
+test("known read-only VMM POST writes no mutation audit record", async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
+  await cmd("raw").run(
+    ctx({
+      auditDir,
+      args: ["SYNO.Virtualization.Guest", "read_ovf"],
+      flags: { post: true },
+    })
+  );
   assert.deepEqual(auditLines(auditDir), []);
 });
 

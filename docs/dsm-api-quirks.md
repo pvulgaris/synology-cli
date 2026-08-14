@@ -24,6 +24,15 @@ DSM error codes are NOT what they sound like — verified against [N4S4/synology
 - **POST is required for state-changing calls.** GET often yields 503 / "fetch failed" mid-flight. Set `post: true` on `SynologyCallOptions`.
 - **DSM frequently drops the TCP connection mid-execution on state changes** (`Package.Control.stop`, `Project.build`, etc.). The action still completes server-side. Catch network-level errors (`fetch failed` / `ECONNRESET` / `ETIMEDOUT` / `socket hang up`) and verify via a status-poll instead of bailing.
 
+## Virtual Machine Manager observations
+
+The following `SYNO.Virtualization.Guest` v1 calls were observed to return discovery data without changing persistent VMM state. The raw-command confirmation policy treats only these exact API and method pairs as read-only exceptions:
+
+- `list_resource`
+- `check_availability`
+- `gen_mac`
+- `read_ovf`, which requires POST and parses an OVA already present on DSM
+
 ## Provisional network API observations
 
 These shapes were observed in DSM 7 Network UI traffic. They are notes for
