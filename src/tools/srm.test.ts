@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SynoClient, SynologyCallOptions } from "../client.js";
-import { routerSrmOsCheckUpdate } from "./srm.js";
+import { routerSrmClients, routerSrmOsCheckUpdate } from "./srm.js";
 
 function fakeClient(handlers: Record<string, (params: Record<string, unknown>) => unknown>): SynoClient {
   const call = async (opts: SynologyCallOptions): Promise<unknown> => {
@@ -41,4 +41,55 @@ test("router OS: System.info failure degrades current_version to null, still rep
   // A null current_version from a *failed* read must be distinguishable from a
   // genuinely-absent one, so the digest doesn't present it as known.
   assert.match(o.warning ?? "", /current-version read failed/);
+});
+
+test("router clients: returns only the requested MAC from the private inventory read", async () => {
+  const calls: SynologyCallOptions[] = [];
+  const router = {
+    call: async (opts: SynologyCallOptions) => {
+      calls.push(opts);
+      return {
+        devices: [
+          { mac: "aa:bb:cc:dd:ee:ff", hostname: "other", ip_addr: "192.0.2.1" },
+          {
+            mac: "02:11:32:26:84:91",
+            hostname: "haos",
+            ip_addr: "192.0.2.2",
+            ip6_addr: "2001:db8::2",
+            is_online: true,
+            connection: "ethernet",
+            is_wireless: false,
+          },
+        ],
+        exceed_dev_list_max: false,
+      };
+    },
+  } as unknown as SynoClient;
+
+  const result = await routerSrmClients(router, "02-11-32-26-84-91");
+
+  assert.deepEqual(result.client, {
+    mac: "02:11:32:26:84:91",
+    hostname: "haos",
+    ipv4: "192.0.2.2",
+    ipv6: "2001:db8::2",
+    online: true,
+    connection: "ethernet",
+    wireless: false,
+  });
+  assert.deepEqual(calls[0].params, { filters: "{}" });
+  assert.equal(calls[0].sensitiveResponse, true);
+});
+
+test("router clients: rejects malformed MACs before reading the inventory", async () => {
+  let called = false;
+  const router = {
+    call: async () => {
+      called = true;
+      return {};
+    },
+  } as unknown as SynoClient;
+
+  await assert.rejects(() => routerSrmClients(router, "not-a-mac"), /Invalid MAC address/);
+  assert.equal(called, false);
 });

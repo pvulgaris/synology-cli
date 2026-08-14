@@ -7,7 +7,9 @@ import { join } from "node:path";
 import {
   nasContainerControl,
   nasContainerImagesList,
+  nasContainerInfo,
   nasContainerLogs,
+  nasContainerStats,
   nasContainerProjectDeploy,
   nasContainerProjectInfo,
   nasContainerProjectsList,
@@ -115,6 +117,165 @@ test("container reads supply DSM's required all-results parameters and normalize
   assert.deepEqual(logs.logs.map((entry) => entry.text), ["first", "second"]);
   assert.equal(images.images[0].repository, "example/app");
   assert.deepEqual(calls[2].params, { offset: 0, limit: -1 });
+});
+
+test("container info exposes runtime configuration without environment secrets", async () => {
+  const calls: any[] = [];
+  const dsm = {
+    call: async (opts: any) => {
+      calls.push(opts);
+      return {
+        details: {
+          Name: "/app",
+          Config: {
+            Image: "example/app:stable",
+            Entrypoint: ["/entrypoint"],
+            Cmd: [
+              "serve",
+              "--fabricid=1",
+              "--password",
+              "do-not-return",
+              "TOKEN=also-secret",
+              "https://user:credential@example.test/path",
+            ],
+            Env: ["NORMAL=value", "PASSWORD=do-not-return", "EMPTY"],
+            Labels: {
+              "com.docker.compose.project": "demo",
+              "com.docker.compose.service": "app",
+              private: "do-not-return",
+            },
+          },
+          HostConfig: {
+            NetworkMode: "host",
+          },
+          Mounts: [
+            {
+              Type: "bind",
+              Source: "/volume1/app",
+              Destination: "/data",
+              Mode: "rw",
+              RW: true,
+            },
+          ],
+        },
+        profile: {
+          env_variables: [{ key: "PASSWORD", value: "do-not-return" }],
+        },
+      };
+    },
+  } as any;
+
+  const result = await nasContainerInfo(dsm, "/app");
+
+  assert.equal(result.name, "app");
+  assert.equal(result.image, "example/app:stable");
+  assert.equal(result.network_mode, "host");
+  assert.deepEqual(result.command, {
+    entrypoint: ["/entrypoint"],
+    args: [
+      "serve",
+      "--fabricid=1",
+      "--password",
+      "***",
+      "TOKEN=***",
+      "https://user:***@example.test/path",
+    ],
+  });
+  assert.deepEqual(result.environment_keys, ["EMPTY", "NORMAL", "PASSWORD"]);
+  assert.deepEqual(result.compose, { project: "demo", service: "app" });
+  assert.equal(result.mounts[0].destination, "/data");
+  assert.deepEqual(calls[0].params, { name: '"app"' });
+  assert.equal(calls[0].sensitiveResponse, true);
+  assert.doesNotMatch(JSON.stringify(result), /do-not-return|also-secret|credential/);
+});
+
+test("container stats calculate CPU from two live snapshots and compact resource counters", async () => {
+  const calls: any[] = [];
+  let statsCall = 0;
+  const dsm = {
+    call: async (opts: any) => {
+      calls.push(opts);
+      if (opts.method === "list") {
+        return {
+          containers: [{ id: "abc", name: "app", status: "running" }],
+          total: 1,
+        };
+      }
+      statsCall += 1;
+      const second = statsCall === 2;
+      return {
+        abc: {
+          id: "abc",
+          name: "/app",
+          read: second ? "2026-08-14T20:00:01Z" : "2026-08-14T20:00:00Z",
+          cpu_stats: {
+            cpu_usage: { total_usage: second ? 300 : 100 },
+            system_cpu_usage: second ? 2_000 : 1_000,
+            online_cpus: 2,
+          },
+          memory_stats: {
+            usage: 1_000,
+            limit: 2_000,
+            stats: { total_inactive_file: 200 },
+          },
+          networks: {
+            eth0: { rx_bytes: 10, tx_bytes: 20 },
+            eth1: { rx_bytes: 30, tx_bytes: 40 },
+          },
+          blkio_stats: {
+            io_service_bytes_recursive: [
+              { op: "Read", value: 50 },
+              { op: "write", value: 60 },
+            ],
+          },
+        },
+      };
+    },
+  } as any;
+
+  const result = await nasContainerStats(dsm, "/app");
+
+  assert.deepEqual(result, {
+    id: "abc",
+    name: "app",
+    status: "running",
+    running: true,
+    sampled_at: "2026-08-14T20:00:01Z",
+    cpu_percent: 40,
+    memory_used_bytes: 800,
+    memory_limit_bytes: 2_000,
+    memory_percent: 40,
+    network_rx_bytes: 40,
+    network_tx_bytes: 60,
+    block_read_bytes: 50,
+    block_write_bytes: 60,
+  });
+  assert.equal(calls.filter((call) => call.method === "stats").length, 2);
+  assert.deepEqual(calls[1], {
+    api: "SYNO.Docker.Container",
+    method: "stats",
+    version: 1,
+  });
+});
+
+test("container stats do not resample stopped containers", async () => {
+  let statsCalls = 0;
+  const dsm = {
+    call: async (opts: any) => {
+      if (opts.method === "list") {
+        return { containers: [{ id: "abc", name: "app", status: "stopped" }] };
+      }
+      statsCalls += 1;
+      return { abc: { id: "abc", name: "/app", memory_stats: {} } };
+    },
+  } as any;
+
+  const result = await nasContainerStats(dsm, "app");
+
+  assert.equal(statsCalls, 1);
+  assert.equal(result.running, false);
+  assert.equal(result.cpu_percent, null);
+  assert.equal(result.memory_used_bytes, 0);
 });
 
 test("project reads resolve a name and omit Compose content", async () => {

@@ -33,6 +33,26 @@ The following `SYNO.Virtualization.Guest` v1 calls were observed to return disco
 - `gen_mac`
 - `read_ovf`, which requires POST and parses an OVA already present on DSM
 
+`SYNO.Virtualization.Cluster.get_total_progress` v1 is also a read-only poll.
+It reports progress for a supplied `prefix`, such as `virtualization_guest`,
+and is an exact raw-command confirmation exception.
+
+## Container Manager observations
+
+`SYNO.Docker.Container.stats` v1 is a GET read that returns Docker stats keyed
+by container ID. Each record includes the container name and raw CPU, memory,
+network, and block-I/O counters. Stopped containers remain in the response with
+empty counters and a zero-date `read` timestamp. CPU percentage requires two
+snapshots because DSM returns an empty `precpu_stats` record.
+The raw-command confirmation policy treats this exact endpoint as a read-only
+exception because `stats` is not otherwise a recognized read method name.
+
+`SYNO.Docker.Container.get` v1 accepts a JSON-quoted `name` and returns
+`{details, profile}`. Both branches may include environment values and command
+arguments, so named reads suppress raw response tracing. The supported
+`containers info` output omits environment values and redacts secret-shaped
+command options.
+
 ## Provisional network API observations
 
 These shapes were observed in DSM 7 Network UI traffic. They are notes for

@@ -12,7 +12,11 @@ import fs from "node:fs/promises";
 
 import type { RuntimeConfig } from "../config.js";
 import type { SynoClient } from "../client.js";
-import { SynologyApiError, isSoftTransportError } from "../client.js";
+import {
+  SynologyApiError,
+  isSensitiveParamKey,
+  isSoftTransportError,
+} from "../client.js";
 import { withAudit } from "../audit.js";
 import { poll } from "./poll.js";
 
@@ -30,7 +34,10 @@ interface ContainerWire {
   image?: string;
   status?: string;
   Name?: string;
-  Config?: { Image?: string; User?: string };
+  Config?: {
+    Image?: string;
+    User?: string;
+  };
   State?: {
     Status?: string;
     Running?: boolean;
@@ -48,6 +55,51 @@ interface ContainerListWire {
 interface ContainerLogWire {
   total?: number;
   logs?: Array<{ created?: string; stream?: string; text?: string }>;
+}
+
+interface ContainerCpuStatsWire {
+  cpu_usage?: { total_usage?: number };
+  online_cpus?: number;
+  system_cpu_usage?: number;
+}
+
+interface ContainerStatsWire {
+  id?: string;
+  name?: string;
+  read?: string;
+  cpu_stats?: ContainerCpuStatsWire;
+  memory_stats?: {
+    usage?: number;
+    limit?: number;
+    stats?: { total_inactive_file?: number; inactive_file?: number };
+  };
+  networks?: Record<string, { rx_bytes?: number; tx_bytes?: number }>;
+  blkio_stats?: {
+    io_service_bytes_recursive?: Array<{ op?: string; value?: number }> | null;
+  };
+}
+
+type ContainerStatsListWire = Record<string, ContainerStatsWire>;
+
+interface ContainerDetailWire {
+  details?: {
+    Name?: string;
+    Config?: {
+      Image?: string;
+      Entrypoint?: string[] | string | null;
+      Cmd?: string[] | null;
+      Env?: string[] | null;
+      Labels?: Record<string, string> | null;
+    };
+    HostConfig?: { NetworkMode?: string };
+    Mounts?: Array<{
+      Type?: string;
+      Source?: string;
+      Destination?: string;
+      Mode?: string;
+      RW?: boolean;
+    }>;
+  };
 }
 
 interface ImageListWire {
@@ -196,6 +248,165 @@ async function findContainer(
 ): Promise<ContainerState | null> {
   const data = await nasContainersList(dsm);
   return data.containers.find((container) => container.name === stripLeadingSlash(name)) ?? null;
+}
+
+function stringList(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
+}
+
+function redactCommandArgs(values: string[]): string[] {
+  let redactNext = false;
+  return values.map((value) => {
+    if (redactNext) {
+      redactNext = false;
+      return "***";
+    }
+    const separator = value.indexOf("=");
+    if (separator >= 0) {
+      const key = value.slice(0, separator).replace(/^-+/, "");
+      if (isSensitiveParamKey(key)) return `${value.slice(0, separator + 1)}***`;
+    }
+    if (value.startsWith("-") && isSensitiveParamKey(value.replace(/^-+/, ""))) {
+      redactNext = true;
+    }
+    return value.replace(/:\/\/([^:@/\s]+):([^@/\s]+)@/g, "://$1:***@");
+  });
+}
+
+export async function nasContainerInfo(dsm: SynoClient, nameInput: string) {
+  const name = stripLeadingSlash(nameInput);
+  const data = await dsm.call<ContainerDetailWire>({
+    api: "SYNO.Docker.Container",
+    method: "get",
+    version: 1,
+    params: { name: JSON.stringify(name) },
+    sensitiveResponse: true,
+  });
+  const details = data.details;
+  if (!details) throw new Error(`Container Manager returned no details for "${name}".`);
+  const config = details.Config;
+  const labels = config?.Labels ?? {};
+  const environmentKeys = (config?.Env ?? []).map((entry) => entry.split("=", 1)[0]);
+  return {
+    name: stripLeadingSlash(details.Name ?? name),
+    image: config?.Image,
+    command: {
+      entrypoint: redactCommandArgs(stringList(config?.Entrypoint)),
+      args: redactCommandArgs(config?.Cmd ?? []),
+    },
+    network_mode: details.HostConfig?.NetworkMode,
+    mounts: (details.Mounts ?? []).map((mount) => ({
+      type: mount.Type,
+      source: mount.Source,
+      destination: mount.Destination,
+      mode: mount.Mode,
+      read_write: mount.RW,
+    })),
+    environment_keys: [...new Set(environmentKeys)].sort(),
+    compose: {
+      project: labels["com.docker.compose.project"],
+      service: labels["com.docker.compose.service"],
+    },
+  };
+}
+
+async function readContainerStats(dsm: SynoClient): Promise<ContainerStatsListWire> {
+  return dsm.call<ContainerStatsListWire>({
+    api: "SYNO.Docker.Container",
+    method: "stats",
+    version: 1,
+  });
+}
+
+function findContainerStats(
+  snapshots: ContainerStatsListWire,
+  name: string
+): ContainerStatsWire | undefined {
+  return Object.values(snapshots).find(
+    (snapshot) => stripLeadingSlash(snapshot.name ?? "") === name
+  );
+}
+
+function cpuPercent(
+  current: ContainerCpuStatsWire | undefined,
+  previous: ContainerCpuStatsWire | undefined
+): number | null {
+  const used = current?.cpu_usage?.total_usage;
+  const previousUsed = previous?.cpu_usage?.total_usage;
+  const system = current?.system_cpu_usage;
+  const previousSystem = previous?.system_cpu_usage;
+  const cpus = current?.online_cpus;
+  if (
+    used === undefined ||
+    previousUsed === undefined ||
+    system === undefined ||
+    previousSystem === undefined ||
+    !cpus
+  ) return null;
+  const usedDelta = used - previousUsed;
+  const systemDelta = system - previousSystem;
+  if (usedDelta < 0 || systemDelta <= 0) return null;
+  return Math.round((usedDelta / systemDelta) * cpus * 10_000) / 100;
+}
+
+function memoryUsed(stats: ContainerStatsWire): number {
+  const usage = stats.memory_stats?.usage ?? 0;
+  const inactive =
+    stats.memory_stats?.stats?.total_inactive_file ??
+    stats.memory_stats?.stats?.inactive_file ??
+    0;
+  return inactive < usage ? usage - inactive : usage;
+}
+
+function networkBytes(
+  stats: ContainerStatsWire,
+  field: "rx_bytes" | "tx_bytes"
+): number {
+  return Object.values(stats.networks ?? {}).reduce(
+    (total, network) => total + (network[field] ?? 0),
+    0
+  );
+}
+
+function blockBytes(stats: ContainerStatsWire, operation: "read" | "write"): number {
+  return (stats.blkio_stats?.io_service_bytes_recursive ?? []).reduce(
+    (total, entry) =>
+      entry.op?.toLowerCase() === operation ? total + (entry.value ?? 0) : total,
+    0
+  );
+}
+
+export async function nasContainerStats(dsm: SynoClient, nameInput: string) {
+  const name = stripLeadingSlash(nameInput);
+  const container = await findContainer(dsm, name);
+  if (!container) throw new Error(`Container "${name}" not found.`);
+
+  const first = findContainerStats(await readContainerStats(dsm), name);
+  if (!first) throw new Error(`Container Manager returned no stats for "${name}".`);
+  const current = container.running
+    ? findContainerStats(await readContainerStats(dsm), name) ?? first
+    : first;
+  const used = memoryUsed(current);
+  const limit = current.memory_stats?.limit ?? 0;
+  return {
+    id: current.id ?? container.id,
+    name,
+    status: container.status,
+    running: container.running,
+    sampled_at: current.read,
+    cpu_percent: container.running
+      ? cpuPercent(current.cpu_stats, first.cpu_stats)
+      : null,
+    memory_used_bytes: used,
+    memory_limit_bytes: limit,
+    memory_percent:
+      limit > 0 ? Math.round((used / limit) * 10_000) / 100 : null,
+    network_rx_bytes: networkBytes(current, "rx_bytes"),
+    network_tx_bytes: networkBytes(current, "tx_bytes"),
+    block_read_bytes: blockBytes(current, "read"),
+    block_write_bytes: blockBytes(current, "write"),
+  };
 }
 
 export async function nasContainerLogs(

@@ -150,6 +150,7 @@ test("gate: read commands are free to invoke", () => {
 test("gate: raw read methods are free but POST is gated", () => {
   const raw = byName("raw");
   assert.equal(requiresConfirmation(raw, {}, ["SYNO.Core.Share", "list"]), false);
+  assert.equal(requiresConfirmation(raw, {}, ["SYNO.Docker.Container", "stats"]), false);
   assert.equal(requiresConfirmation(raw, { post: true }), true);
 });
 
@@ -174,6 +175,19 @@ test("gate: known read-only VMM discovery calls do not require confirmation", ()
     requiresConfirmation(raw, {}, ["SYNO.Other.Api", "gen_mac"]),
     true,
     "the exception must remain scoped to the observed VMM API"
+  );
+  assert.equal(
+    requiresConfirmation(
+      raw,
+      {},
+      ["SYNO.Virtualization.Cluster", "get_total_progress"]
+    ),
+    false
+  );
+  assert.equal(
+    requiresConfirmation(raw, {}, ["SYNO.Other.Api", "get_total_progress"]),
+    true,
+    "the progress exception must remain scoped to the observed VMM API"
   );
 });
 
@@ -264,6 +278,9 @@ test("usage: a malformed raw param throws UsageError", async () => {
 test("raw GET is a read and writes no audit record", async () => {
   const auditDir = mkdtempSync(join(tmpdir(), "syno-audit-"));
   await cmd("raw").run(ctx({ auditDir, args: ["SYNO.Core.System", "info"] }));
+  await cmd("raw").run(
+    ctx({ auditDir, args: ["SYNO.Docker.Container", "stats"] })
+  );
   assert.deepEqual(auditLines(auditDir), []);
 });
 
