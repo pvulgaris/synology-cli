@@ -40,7 +40,7 @@ import { nasExternalAccess } from "./tools/external.js";
 import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
 import { nasDsmOsCheckUpdate } from "./tools/updates.js";
-import { routerSrmOsCheckUpdate } from "./tools/srm.js";
+import { routerSrmClients, routerSrmOsCheckUpdate } from "./tools/srm.js";
 import {
   nasHyperbackupTasks,
   nasShareSnapshots,
@@ -50,7 +50,9 @@ import { nasTaskschedulerList } from "./tools/scheduler.js";
 import {
   nasContainerControl,
   nasContainerImagesList,
+  nasContainerInfo,
   nasContainerLogs,
+  nasContainerStats,
   nasContainerProjectDeploy,
   nasContainerProjectInfo,
   nasContainerProjectsList,
@@ -67,6 +69,8 @@ const RAW_READ_ONLY_CALLS = new Set([
   "SYNO.Virtualization.Guest.gen_mac",
   "SYNO.Virtualization.Guest.list_resource",
   "SYNO.Virtualization.Guest.read_ovf",
+  "SYNO.Virtualization.Cluster.get_total_progress",
+  "SYNO.Docker.Container.stats",
 ]);
 
 function rawCallMayMutate(api: string, method: string, post: boolean): boolean {
@@ -247,6 +251,20 @@ export const COMMANDS: RegisteredCommand[] = [
         name: arg(ctx, 0),
         limit: intFlag(ctx, "limit"),
       }),
+  },
+  {
+    name: "containers info",
+    summary: "One container's command, network mode, mounts, and environment names.",
+    platforms: DSM,
+    args: ["name"],
+    run: (ctx) => nasContainerInfo(ctx.client, arg(ctx, 0)),
+  },
+  {
+    name: "containers stats",
+    summary: "Current CPU, memory, network, and disk I/O use for one container.",
+    platforms: DSM,
+    args: ["name"],
+    run: (ctx) => nasContainerStats(ctx.client, arg(ctx, 0)),
   },
   {
     name: "containers control",
@@ -443,6 +461,13 @@ export const COMMANDS: RegisteredCommand[] = [
     summary: "Whether an SRM router OS update is available (read-only).",
     platforms: SRM,
     run: ({ client }) => routerSrmOsCheckUpdate(client),
+  },
+  {
+    name: "router clients",
+    summary: "Look up one remembered SRM client by MAC without returning the full device inventory.",
+    platforms: SRM,
+    args: ["mac"],
+    run: (ctx) => routerSrmClients(ctx.client, arg(ctx, 0)),
   },
 
   // ── Escape hatch ──────────────────────────────────────────────────────────

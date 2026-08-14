@@ -8,9 +8,8 @@
  *     privilege"; a Normal user gets code 402 at login).
  * The router client is constructed read-only (see SynoClient).
  *
- * The only named operation here checks for an SRM OS update. SRM exposes no
- * package-update API (`SYNO.Core.Package.Server` returns 103), so there is no
- * router package command to sit beside it.
+ * SRM exposes no package-update API (`SYNO.Core.Package.Server` returns 103),
+ * so there is no router package command alongside these reads.
  *
  * Detection only — no SRM writes (the router login uses a dedicated SRM admin
  * credential; a bricked router would also drop this very connection).
@@ -27,4 +26,57 @@ import { osCheckUpdate } from "./os-check.js";
  *  and 104s on SRM). */
 export function routerSrmOsCheckUpdate(router: SynoClient): Promise<OsUpdateStatus> {
   return osCheckUpdate(router, 1);
+}
+
+interface RouterClientWire {
+  mac?: string;
+  hostname?: string;
+  ip_addr?: string;
+  ip6_addr?: string;
+  is_online?: boolean;
+  connection?: string;
+  is_wireless?: boolean;
+}
+
+interface RouterClientsWire {
+  devices?: RouterClientWire[];
+  exceed_dev_list_max?: boolean;
+}
+
+function canonicalMac(value: string): string {
+  const compact = value.replace(/[:-]/g, "").toLowerCase();
+  if (!/^[0-9a-f]{12}$/.test(compact)) {
+    throw new Error(`Invalid MAC address "${value}".`);
+  }
+  return compact.match(/../g)!.join(":");
+}
+
+/** SRM has no verified server-side MAC filter, so read the inventory privately
+ * and return only the exact match instead of exposing every remembered device. */
+export async function routerSrmClients(router: SynoClient, macInput: string) {
+  const mac = canonicalMac(macInput);
+  const data = await router.call<RouterClientsWire>({
+    api: "SYNO.Core.Network.NSM.Device",
+    method: "get",
+    version: 1,
+    params: { filters: JSON.stringify({}) },
+    sensitiveResponse: true,
+  });
+  const match = (data.devices ?? []).find(
+    (device) => device.mac && canonicalMac(device.mac) === mac
+  );
+  return {
+    client: match
+      ? {
+          mac: canonicalMac(match.mac!),
+          hostname: match.hostname,
+          ipv4: match.ip_addr,
+          ipv6: match.ip6_addr,
+          online: match.is_online,
+          connection: match.connection,
+          wireless: match.is_wireless,
+        }
+      : null,
+    source_truncated: data.exceed_dev_list_max ?? false,
+  };
 }
