@@ -2,7 +2,7 @@
 
 `syno` is an agent-oriented command-line tool for Synology DSM and SRM devices. It provides curated commands for common operations and a target-aware `raw` escape hatch for the rest.
 
-Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the Synology API trace. Exit 0 on success, 1 on failure, 2 on a usage error.
+Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the Synology API trace. Exit 0 on success, 1 on failure, 2 on a usage error, 3 when `syno state` finds drift.
 
 ## Install
 
@@ -66,6 +66,32 @@ Two hard refusals: updating DSM itself and updating kernel-flagged packages. App
 Uninstall always preserves package data. Actual data deletion is package-specific and belongs in the DSM UI.
 
 Every write is appended to a monthly JSONL audit log with the before/after state. Project deploy records the Compose file's SHA-256, not its content, because Compose environment values may contain credentials.
+
+## Declared state
+
+`syno state check <file>` compares the NAS with an expected-state JSON file and
+exits 3 on drift; `syno state apply <file> --yes` converges the fields with a
+verified write path, reads the NAS again, and exits 3 if any drift remains. The
+file declares a share (`vol_path`, `btrfs_cow`, `recycle_bin`, `encryption`,
+`support_snapshot`), the account that writes to it (`description`,
+`password_never_expire`, and a read-only share permission), and the share's
+snapshot schedule, Smart Retention counts and immutable window. The schedule's
+`repeat`, `repeat_hour`, `repeat_min` and `last_work_hour` are DSM's own fields;
+once a day is all zeros with `last_work_hour` equal to the start hour. Apply sets
+the permission, schedule, retention and immutability; creating the share or the
+account stays a DSM step. Unknown keys and wrong types are usage errors, so a
+typo cannot skip a check.
+
+```json
+{
+  "share": {"name": "backups", "vol_path": "/volume1", "btrfs_cow": true, "recycle_bin": false, "encryption": 0},
+  "account": {"name": "backups", "description": "Managed backup account: backups", "password_never_expire": true},
+  "snapshots": {"enabled": true, "time": "04:30", "week_days": [0, 1, 2, 3, 4, 5, 6],
+                "repeat": 0, "repeat_hour": 0, "repeat_min": 0, "last_work_hour": 4,
+                "smart_recycle": {"hourly": 24, "daily": 7, "weekly": 2, "monthly": 1, "yearly": 0},
+                "immutable_days": 7}
+}
+```
 
 ## `raw`
 

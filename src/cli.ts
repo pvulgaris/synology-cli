@@ -6,7 +6,8 @@
  * Output contract, chosen for agent use as much as human use:
  *   - stdout is only ever the result, as JSON. Pipe it to jq without filtering.
  *   - stderr carries concise progress and errors; --verbose adds the API trace.
- *   - exit 0 on success, 1 on failure, 2 on a usage error.
+ *   - exit 0 on success, 1 on failure, 2 on a usage error, 3 when `state`
+ *     finds drift.
  *
  * Each command loads only its selected DSM or SRM target and credentials.
  */
@@ -116,7 +117,7 @@ async function main(): Promise<Outcome> {
   }
   const client = new SynoClient(target, { verbose });
   const result = await command.run({ runtime, target, client, args, flags });
-  return { code: 0, stdout: JSON.stringify(result, null, 2) };
+  return { code: command.exitCode?.(result) ?? 0, stdout: JSON.stringify(result, null, 2) };
 }
 
 /**

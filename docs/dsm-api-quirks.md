@@ -175,7 +175,7 @@ This is why `tools/packages.ts` wraps string params in `JSON.stringify()` everyw
 - **TLS profile levels are INVERSELY numbered** (`SYNO.Core.Web.Security` / `SYNO.Core.Security.TLSProfile` → `default-level`, per-service `current-level`): `0`=Modern (strongest), `1`=Intermediate, `2`=Old/Compatible (weakest). Verified against a live NAS: a `dsm` service at `current-level: 0` accepts only TLS 1.2/1.3 with PFS+AEAD ciphers and rejects all CBC/SHA1/3DES. So a service is **downgraded (weaker) when `current-level > default-level`**, not less — the intuitive "higher number = stronger" is backwards here. Same misread class as the SMB enum: it made a hardened service (level 0 under a default of 2) look downgraded.
 - **Mail notification recipients moved to `profiles` in DSM 7.3** (`SYNO.Core.Notification.Mail.Conf` → call at **version 2**, not 1): the legacy flat `mail` array is now always `[]`; the actual recipients live in a `profiles` list ("Recipient Profiles" in the UI), each `{ target_type: "mail", target_name: "<label>", target_config: { mail: "<addr>" } }`. Counting the v1 `mail` array reports zero recipients even when one is configured — verified from a DSM UI HAR. Read `data.profiles` filtered to `target_type === "mail"`, and take the address from `target_config.mail` (the authoritative address) rather than `target_name` (a display label that may differ). Because DSM predating 7.3 may not serve v2 at all, **call v2 first and fall back to a real v1 `get`** (which returns the flat `mail` array) — don't rely on the `mail` field inside a v2 response for older DSM, since a v2-unsupported error nulls the whole response. The other fields (`enable_mail`, `enable_oauth`, `smtp_info.*`, `sender_mail`, `subject_prefix`) are unchanged between v1 and v2.
 
-## Btrfs snapshot config lives on `SYNO.Core.Share`, not `Share.Snapshot`
+## Btrfs snapshot config: summary on `SYNO.Core.Share`, writes elsewhere
 
 Discovered live on 2026-07-20 against DSM 7.3.2-86009 Update 4. Finding the schedule and retention
 policy for a share's snapshots costs a session if you start from the obvious API, so start here.
@@ -190,9 +190,17 @@ as `additional=["snapshot_info"]`. The response carries:
 `next_trigger_time` is the practical "the schedule is enabled" signal. There is no separate enabled
 flag, so a share with no scheduled snapshots is one with no next trigger.
 
-**`SYNO.Core.Share.Snapshot` (v1-2) only lists snapshots.** Every config-shaped method probed against
-it (`get_setting`, `get_snapshot_setting`, `get_schedule`, `get_policy`, `get_config`, and others)
-returns 103. Don't keep guessing method names there; the config isn't on that API.
+**The writable forms are elsewhere** (captured from the DSM 7.4.1 UI on 2026-09-28, used by
+`syno state apply`). `SYNO.Core.Share.Snapshot get_schedule`/`set_schedule` exist at **v1 only**; v2
+answers 103, which is why an earlier probe concluded the method didn't exist. `get_schedule` returns
+`{ enable_snapshot_schedule, task_id, schedule }`, and `set_schedule` takes the same with the edited
+`schedule` object. The retention policy is `SYNO.DisasterRecovery.Retention` v1 `get`/`set` with
+`type:"Share"` and `name` (set accepts the record get returns; `policyType` 128 is Smart Retention; get
+carries each tier count twice, `advDaily` and `daily`, and set stores the `adv*` copy: a live change of
+`advYearly` and `yearly` to 1 read back `advYearly: 1, yearly: 0`, so a write that sets only the plain
+keys changes nothing), and
+the share's immutable window is the same API's `get_worm_lock`/`set_worm_lock` with `worm_lock_enable`
+and `worm_lock_day`.
 
 **`SYNO.Btrfs.Replica` and `SYNO.Replica.Share` are replication APIs, not local-snapshot config.** On a
 NAS that sends backups to C2 rather than receiving replication they return 1001 / 3000 regardless of

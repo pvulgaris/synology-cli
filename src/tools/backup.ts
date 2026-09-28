@@ -15,8 +15,8 @@
  * SYNO.Core.Share.Snapshot list v2 (+ additional[]) → { total, snapshots: [{ time,
  *   lock, worm_lock, worm_lock_day, worm_lock_end, schedule_snapshot, desc }] }.
  *   `time` is a "GMT<±HH>-YYYY.MM.DD-HH.MM.SS" string; worm_lock is the immutable
- *   (WORM) flag. The snapshot times reveal the effective schedule; the declarative
- *   snapshot-schedule config is not exposed by this API.
+ *   (WORM) flag. The declarative schedule is this API's get_schedule at v1 (see
+ *   tools/state.ts).
  */
 
 import { SynologyApiError, type SynoClient } from "../client.js";
@@ -148,12 +148,12 @@ function parseDsmWeekName(week: unknown): number[] {
  * the retention policy (how long they're kept). Distinct from `nasShareSnapshots`,
  * which lists the snapshots themselves.
  *
- * Source is `SYNO.Core.Share get` with `additional=["snapshot_info"]`, not the
- * Snapshot or Snapshot Replication APIs: `SYNO.Core.Share.Snapshot` only lists
- * snapshots (its config methods 103), and the Btrfs.Replica / Replica.Share APIs
- * are replication, not local-snapshot config (verified 2026-07). There is no
- * task-level immutability field here; per-snapshot WORM lock state comes from
- * `nasShareSnapshots`, so this returns a pointer rather than a lock flag.
+ * Source is `SYNO.Core.Share get` with `additional=["snapshot_info"]`, which
+ * carries the schedule and retention summary in one read. The writable forms
+ * live elsewhere (`SYNO.Core.Share.Snapshot get_schedule` v1 and
+ * `SYNO.DisasterRecovery.Retention`, see tools/state.ts); the immutable window
+ * is `Retention get_worm_lock`, not part of snapshot_info, so this returns a
+ * pointer rather than a lock flag.
  */
 export async function nasShareSnapshotConfig(dsm: SynoClient, args: { share: string }) {
   const data = await dsm.call({

@@ -60,6 +60,8 @@ import {
   nasContainersList,
 } from "./tools/containers.js";
 import { withAudit } from "./audit.js";
+import { nasStateApply, nasStateCheck, parseExpectedState } from "./tools/state.js";
+import { readFileSync } from "node:fs";
 
 /** Raw calls observed to use write-shaped method names or POST for read-only
  * work. Keep these exceptions endpoint-specific so unknown DSM APIs retain the
@@ -113,6 +115,9 @@ export interface Command {
    */
   mutating?: boolean;
   run(ctx: CommandContext): Promise<unknown>;
+  /** Exit code for a successful run, when the result itself carries a verdict
+   *  (default 0). */
+  exitCode?(result: unknown): number;
 }
 
 export type RegisteredCommand = Command;
@@ -152,6 +157,17 @@ export function commandUsage(command: RegisteredCommand): string {
     return typeof spec !== "string" && spec.required ? rendered : `[${rendered}]`;
   });
   return [...positionals, ...flags].join(" ");
+}
+
+/** Drift gets its own code: 1 already means a runtime or API failure. */
+const driftExit = (result: unknown) => ((result as { ok: boolean }).ok ? 0 : 3);
+
+function expectedState(path: string) {
+  try {
+    return parseExpectedState(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new UsageError(`cannot read expected state ${path}: ${(err as Error).message}`);
+  }
 }
 
 /** Validation guarantees required positional arguments before dispatch. */
@@ -216,6 +232,27 @@ export const COMMANDS: RegisteredCommand[] = [
     platforms: DSM,
     args: ["share"],
     run: (ctx) => nasShareSnapshotConfig(ctx.client, { share: arg(ctx, 0) }),
+  },
+
+  // ── Declared state ────────────────────────────────────────────────────────
+  {
+    name: "state check",
+    summary:
+      "Compare the NAS with an expected-state JSON file (share, account, permission, snapshot schedule/retention/immutability). Exits 3 on drift.",
+    platforms: DSM,
+    args: ["file"],
+    run: (ctx) => nasStateCheck(ctx.client, expectedState(arg(ctx, 0))),
+    exitCode: driftExit,
+  },
+  {
+    name: "state apply",
+    summary:
+      "Converge the NAS to an expected-state JSON file where a verified write exists (share permission, snapshot schedule, retention, immutability), then re-read it; drift with fix \"dsm\" needs the DSM UI. Exits 3 if drift remains.",
+    platforms: DSM,
+    args: ["file"],
+    mutating: true,
+    run: (ctx) => nasStateApply(ctx.runtime, ctx.client, expectedState(arg(ctx, 0))),
+    exitCode: driftExit,
   },
 
   // ── Backup & scheduled tasks ──────────────────────────────────────────────
