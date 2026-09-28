@@ -204,11 +204,18 @@ test("gate: every command that can mutate DSM is either mutating or raw", () => 
   // to be declared mutating. `raw` is the sanctioned exception, gated by POST
   // or by a method outside its read allowlist.
   const writeish = COMMANDS.filter((c) =>
-    /install|uninstall|update |control/.test(`${c.name} `)
+    /install|uninstall|update |control|apply/.test(`${c.name} `)
   );
   for (const c of writeish) {
     if (c.name.startsWith("dsm update-check") || c.name === "updates") continue;
     assert.equal(c.mutating, true, `${c.name} touches state but is not marked mutating`);
+  }
+});
+
+test("exit: state drift is 3, distinct from a failure's 1", () => {
+  for (const name of ["state check", "state apply"]) {
+    assert.equal(byName(name).exitCode?.({ ok: false }), 3);
+    assert.equal(byName(name).exitCode?.({ ok: true }), 0);
   }
 });
 

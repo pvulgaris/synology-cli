@@ -5,7 +5,7 @@ description: "Manage a Synology NAS (DSM 7) and SRM router via the `syno` CLI: C
 
 # Synology NAS
 
-`syno` is a command-line tool for DSM and SRM. Every command prints JSON on stdout (pipe it to `jq`); concise progress and errors go to stderr. Add `--verbose` only when the API trace is needed. Exit 0 on success, 1 on failure, 2 on a usage error.
+`syno` is a command-line tool for DSM and SRM. Every command prints JSON on stdout (pipe it to `jq`); concise progress and errors go to stderr. Add `--verbose` only when the API trace is needed. Exit 0 on success, 1 on failure, 2 on a usage error, 3 when `syno state` finds drift.
 
 Auth is owned by the CLI. It loads and caches only the selected target. DSM uses `DSM_*`; SRM uses `SRM_*` and works without DSM configuration. The DSM account is in the `administrators` group because DSM 7 gates its admin APIs on that membership. SRM is read-only at the client layer.
 
@@ -108,6 +108,10 @@ First-time-only gotcha: if Package Center calls return odd errors on a freshly-c
 The CLI treats DSM code 1202 and a dropped connection as ambiguous during project stop/build, then verifies the project state. It never calls a failed deploy successful based on the API response alone. Container Manager's build wrapper does not remove orphan containers, so inspect `containers projects info` after removing a service and confirm any orphan separately before `containers remove`.
 
 The Compose document is sensitive even when the current file has no secret: environment values may add one later. Its request trace and audit value are redacted. The audit keeps the local file path and SHA-256 instead.
+
+## Declared state
+
+`syno state check <expected.json>` diffs a NAS against a declared share, account, permission, snapshot schedule, retention and immutable window; it exits 3 on drift with one finding per drifted field, so several can share a `subject` (`fix: "api"` converges under apply, `"dsm"` needs the DSM UI and carries only the current and expected values). The file is validated strictly: an unknown key or wrong type is a usage error (exit 2), not a skipped check. `syno state apply <expected.json> --yes` converges the `api` findings, reads the NAS again, and lists what it wrote (`writes`) and what still drifts (`findings`). When a user keeps an expected-state file, change those settings through it rather than by hand in DSM, or the next check reports the difference as drift.
 
 ## Protected packages (per-user policy)
 
