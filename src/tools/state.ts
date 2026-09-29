@@ -8,7 +8,8 @@
  * SYNO.Core.Share.Permission list/set v1: { name, user_group_type, permissions }.
  * SYNO.Core.Share.Snapshot get_schedule/set_schedule v1 (v2 answers 103):
  *   set_schedule takes the task_id and schedule object that get_schedule
- *   returned, plus enable_snapshot_schedule.
+ *   returned, plus enable_snapshot_schedule. A task_id of -1 (no task yet)
+ *   makes the NAS create one. get_schedule accepts the name quoted or bare.
  * SYNO.DisasterRecovery.Retention get/set v1: the Smart Recycle policy. get
  *   carries each tier count twice (advDaily and daily); set accepts the record
  *   get returns (policyType 128 = Smart Retention). DSM stores the adv* copy:
@@ -47,8 +48,7 @@ export interface ExpectedState {
     enabled: boolean;
     time: string;
     week_days: number[];
-    // DSM's own schedule fields; once a day is repeat 0 with last_work_hour
-    // equal to the start hour. Other encodings are not captured yet.
+    // DSM's own schedule fields; the encoding is in docs/dsm-api-quirks.md.
     repeat: number;
     repeat_hour: number;
     repeat_min: number;

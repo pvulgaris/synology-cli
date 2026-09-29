@@ -190,17 +190,75 @@ as `additional=["snapshot_info"]`. The response carries:
 `next_trigger_time` is the practical "the schedule is enabled" signal. There is no separate enabled
 flag, so a share with no scheduled snapshots is one with no next trigger.
 
-**The writable forms are elsewhere** (captured from the DSM 7.4.1 UI on 2026-09-28, used by
-`syno state apply`). `SYNO.Core.Share.Snapshot get_schedule`/`set_schedule` exist at **v1 only**; v2
-answers 103, which is why an earlier probe concluded the method didn't exist. `get_schedule` returns
-`{ enable_snapshot_schedule, task_id, schedule }`, and `set_schedule` takes the same with the edited
-`schedule` object. The retention policy is `SYNO.DisasterRecovery.Retention` v1 `get`/`set` with
-`type:"Share"` and `name` (set accepts the record get returns; `policyType` 128 is Smart Retention; get
-carries each tier count twice, `advDaily` and `daily`, and set stores the `adv*` copy: a live change of
-`advYearly` and `yearly` to 1 read back `advYearly: 1, yearly: 0`, so a write that sets only the plain
-keys changes nothing), and
-the share's immutable window is the same API's `get_worm_lock`/`set_worm_lock` with `worm_lock_enable`
-and `worm_lock_day`.
+**The schedule is writable on `SYNO.Core.Share.Snapshot` after all.** `get_schedule`/`set_schedule`
+exist at **v1 only**; v2 answers 103, which is why an earlier probe of this API concluded it had no
+config methods. The retention policy and immutable window are on `SYNO.DisasterRecovery.Retention`. The
+call shapes, and the retention write that must set the `adv*` counts, are in the header of
+`src/tools/state.ts`, which uses them.
+
+**How the `schedule` object encodes the interval.** Source: DSM's own Snapshot Replication client,
+`/webman/3rdparty/SnapshotReplication/disaster_recovery.js` on DSM 7.4.1 (readable with a signed-in
+session's `id` cookie), class `SYNO.SDS.DisasterRecovery.Snapshot.Configure.Schedule`. Two choices were
+also saved in the UI and read back with `get_schedule`, and matched.
+
+The dialog saves only `{ date_type: 0, week_name, hour, min, repeat_hour, repeat_min, last_work_hour }`
+(`getScheduleData`) through `set_schedule` with `enable_snapshot_schedule` and `task_id`. It never writes
+`repeat`, `date`, `monthly_week` or `next_trigger_time`, which is why `repeat` reads 0 everywhere.
+
+| UI interval | `repeat_hour` | `repeat_min` | Notes |
+| --- | --- | --- | --- |
+| Once per day | 0 | 0 | "Last snapshot time" is disabled and saved equal to `hour`. |
+| Every 1, 2, 3, 4, 6, 8 or 12 hours | the hours | 0 | Offered only when the start hour plus the interval is 23 or less. |
+| More options: every 5, 15 or 30 minutes | 0 | the minutes | The dialog forces `min` to 0 and disables it. |
+
+- The dialog refuses to deselect the last weekday, so it never saves an empty `week_name`.
+- `last_work_hour` is chosen from the start hour stepping by the interval up to 23 (every hour for a
+  minute interval), displayed as `HH:` plus the start minute, or `HH:(60 - repeat_min)` for a minute
+  interval.
+- When snapshots run (`GetScheduleInfo`): on each listed weekday, from `hour * 60 + min` to
+  `last_work_hour * 60 + (repeat_min > 0 ? 60 - repeat_min : 0)` minutes, inclusive, every
+  `repeat_hour * 60 + repeat_min` minutes, or once when both are 0. So every 15 minutes with
+  `hour` 4 and `last_work_hour` 6 runs 04:00 to 06:45. The window never wraps past midnight.
+- When loading (`updateScheData`) the dialog combines the two as `repeat_hour + 100 * repeat_min`, so an
+  API-written value outside the lists above has no matching option in the dialog.
+- Immutable snapshots: the protection period is 1 to 30 days, and the dialog refuses a schedule and
+  period that would keep more locked snapshots than the per-share snapshot limit (`CheckWormLockValid`).
+  These checks are client-side only (see below).
+
+**What the NAS does with a written schedule** (DS224+, DSM 7.4.1, 2026-09-28 and 29, on the `backups`
+share and an empty scratch share, written with `set_schedule` unless noted):
+
+- Times are NAS-local. This NAS runs on Pacific time, so check `SYNO.Core.System info` `time_zone`
+  before reading `hour`, `next_trigger_time` or snapshot names (`GMT-07-...`) as local to you.
+- `next_trigger_time` is the true next run in NAS time: 11 schedules written at 03:39 read back
+  exactly what `GetScheduleInfo` predicts (every 3 hours from 00:30 gave 06:30; Wednesday-only gave the
+  next Wednesday). The one exception is below.
+- `get_schedule` keeps reporting a `next_trigger_time` after the schedule is disabled (seen on `arq` and
+  the scratch share), so read `enable_snapshot_schedule` there. `snapshot_info` blanks the schedule
+  instead, which is why `shares snapshot-config` can treat a next trigger as "enabled".
+- Fired and observed in the Snapshot Replication log: once per day at 04:06 on a task created by
+  `set_schedule` with `task_id: -1` (the NAS assigned a new id); every 5 minutes with `hour` 4, `min` 0,
+  `last_work_hour` 4, which ran 04:35, 04:40, 04:45, 04:50 and 04:55 and stopped, as the formula says;
+  and `backups` once per day at 04:30, its first scheduled snapshot after `state apply` restored the
+  schedule, immutable for the configured 7 days. Each run is logged about one second after the minute.
+- The API accepts shapes the dialog cannot produce, and they do not all work. Every 5 minutes with `min`
+  2 (the dialog forces 0) was stored, reported a next run of 03:45, and never ran in 21 minutes of
+  watching; nothing was logged. Also stored without error: every 5 hours, `repeat_hour` and
+  `repeat_min` both set, `min` 10 with a minute interval, and once per day with `last_work_hour` after
+  `hour`; whether those run is unobserved. A schedule that matches what was declared can therefore still
+  never run, so write only the shapes in the table above.
+- The NAS normalizes two fields: `repeat` is always stored as 0 whatever is sent, and a `last_work_hour`
+  before `hour` (a window past midnight) is stored as equal to `hour`.
+- `set_worm_lock` does not enforce the dialog's range: with the lock disabled it stored 0, 31 and 400
+  days. Whether it refuses them with the lock enabled was not tested, because enabling it on a test share
+  locks that share's snapshots for the period.
+
+**Dialog behavior worth knowing before testing by hand.** Changing the interval resets "Last snapshot
+time on scheduled days" to the latest time the interval allows (`updateLastWorkTimeStore`: 23:30 for 1
+hour, 22:30 for 2 hours from 04:30), so set it before pressing OK. The share's snapshots are immutable for the protection period (7 days here), so a snapshot
+that fires by mistake while testing can't be deleted for a week. Choose a window that has already passed
+today. The dialog's OK also saves "Enable immutable snapshots" and its protection period, which is the
+worm lock above.
 
 **`SYNO.Btrfs.Replica` and `SYNO.Replica.Share` are replication APIs, not local-snapshot config.** On a
 NAS that sends backups to C2 rather than receiving replication they return 1001 / 3000 regardless of
