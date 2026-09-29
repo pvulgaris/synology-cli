@@ -171,7 +171,7 @@ test("state apply: the verdict comes from a re-read, and a failed setter does no
   r["SYNO.Core.Share.Permission.list"].items[0].is_writable = true;
   r["SYNO.DisasterRecovery.Retention.get"].advDaily = 3;
   r["SYNO.DisasterRecovery.Retention.get_worm_lock"].worm_lock_enable = false;
-  r["SYNO.Core.Share.Permission.set"] = new Error("socket hang up");
+  r["SYNO.Core.Share.Permission.set"] = new TypeError("fetch failed", { cause: new Error("connect EHOSTUNREACH 192.0.2.1:5001") });
   const calls: SynologyCallOptions[] = [];
   const rt = runtime();
   // Retention.set returns success without taking effect; set_worm_lock does.
@@ -185,7 +185,7 @@ test("state apply: the verdict comes from a re-read, and a failed setter does no
   assert.deepEqual(
     result.writes.map((f) => [f.subject, f.error]),
     [
-      ["permission", "socket hang up"],
+      ["permission", "fetch failed: connect EHOSTUNREACH 192.0.2.1:5001"],
       ["snapshots", undefined],
       ["snapshots", undefined],
     ]

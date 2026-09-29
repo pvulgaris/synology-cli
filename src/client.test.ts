@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { SynologyApiError, SynoClient, isSoftTransportError } from "./client.js";
+import { SynologyApiError, SynoClient, errorMessage, isSoftTransportError } from "./client.js";
 
 function sessionClient(verbose = false): SynoClient {
   const client = new SynoClient(
@@ -146,4 +146,18 @@ test("sensitive DSM errors omit response content from traces and exceptions", as
   const renderedTrace = JSON.stringify(trace);
   assert.doesNotMatch(renderedTrace, /do-not-log/);
   assert.match(renderedTrace, /code=1202/);
+});
+
+test("errorMessage: a failed fetch names its network cause", () => {
+  const err = new TypeError("fetch failed", { cause: new Error("connect EHOSTUNREACH 192.0.2.1:5001") });
+  assert.equal(errorMessage(err), "fetch failed: connect EHOSTUNREACH 192.0.2.1:5001");
+  assert.equal(errorMessage(new Error("plain")), "plain");
+  // A host with several addresses fails with an AggregateError whose message is empty.
+  const both = new TypeError("fetch failed", {
+    cause: new AggregateError(
+      [new Error("connect ECONNREFUSED ::1:5001"), new Error("connect ECONNREFUSED 127.0.0.1:5001")],
+      ""
+    ),
+  });
+  assert.equal(errorMessage(both), "fetch failed: connect ECONNREFUSED ::1:5001; connect ECONNREFUSED 127.0.0.1:5001");
 });

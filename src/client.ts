@@ -119,6 +119,18 @@ export class SynologyApiError extends Error {
   }
 }
 
+/** An error's message plus its network cause. Node's fetch reports every
+ * connection failure as "fetch failed" and keeps the reason (EHOSTUNREACH,
+ * ECONNREFUSED, a certificate error) only in `cause`. When a host has several
+ * addresses the cause is an AggregateError with an empty message and one
+ * error per address. */
+export function errorMessage(err: unknown): string {
+  const e = err as { message?: string; cause?: { message?: string; errors?: { message?: string }[] } } | null;
+  const message = String(e?.message ?? err);
+  const reason = e?.cause?.message || e?.cause?.errors?.map((x) => x.message).join("; ");
+  return reason ? `${message}: ${reason}` : message;
+}
+
 /** A state-changing request may complete on DSM after its connection drops.
  * A DSM response, including an error, makes the outcome known. */
 export function isSoftTransportError(err: unknown): boolean {

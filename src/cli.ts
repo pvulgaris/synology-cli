@@ -13,7 +13,7 @@
  */
 
 import { loadRuntimeConfig, loadTarget } from "./config.js";
-import { SynoClient } from "./client.js";
+import { SynoClient, errorMessage } from "./client.js";
 import {
   COMMANDS,
   UsageError,
@@ -147,5 +147,5 @@ main()
     // A malformed invocation is exit 2 (the documented usage code); anything else
     // is a runtime or API failure at exit 1. Both flush stderr before exiting.
     const code = err instanceof UsageError ? 2 : 1;
-    finish({ code, stderr: `[syno] ${err?.message ?? err}` });
+    finish({ code, stderr: `[syno] ${errorMessage(err)}` });
   });
