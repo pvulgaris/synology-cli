@@ -197,8 +197,8 @@ params. Those codes read like a missing or malformed parameter and aren't. Addin
 
 ## NFS exports and shared-folder creation
 
-No command wraps these; they were driven with `syno raw` on DSM 7.4.1 (2026-09-29) to export a new
-share to a macOS client.
+No command creates a share or turns NFS on; these were driven with `syno raw` on DSM 7.4.1
+(2026-09-29) to export a new share to a macOS client.
 
 - **Creating a share**: `SYNO.Core.Share` v1 `create`, POST, with `name` and a `shareinfo` object:
   `{ name, vol_path, desc, enable_share_cow, enable_recycle_bin, recycle_bin_admin_only,
@@ -208,19 +208,10 @@ share to a macOS client.
   `enabled_minor_ver` (1 is NFSv4.1), `nfs_v4_domain`, `read_size`, `write_size`, `unix_pri_enable`.
   With 4.1 enabled, a macOS client asking for NFSv4.0 is refused ("RPC prog. not avail"); `vers=3`
   mounts.
-- **Export rules**: `SYNO.Core.FileServ.NFS.SharePrivilege` v1. `load` takes **`share_name`** and
-  answers `{ rule: [] }` for a share with no rules; `name` instead answers **2301**. `save`, POST, takes
-  `share_name` and `rule`, and replaces the share's whole rule set. Each rule is
-  `{ client, privilege: "rw" | "ro", root_squash, async, insecure, crossmnt,
-  security_flavor: { kerberos, kerberos_integrity, kerberos_privacy, sys } }`.
-- **`root_squash` names what root is mapped to**, not the exports keyword. `"root"` was accepted and
-  means no mapping, so root is not squashed; `"all_admin"` maps every user to the admin account.
-  `"root_squash"` and `"map_root"` answered 2301. A third-party reference lists the full set as `root`,
-  `admin`, `guest`, `all_admin` and `all_guest`
-  ([pmilano1/synology-dsm-api](https://github.com/pmilano1/synology-dsm-api/blob/master/docs/api-reference/dsm-core/shares.md)).
 - **Mounting from macOS as a normal user** needed `insecure: true` (the mount comes from a
   non-privileged port), a `client` equal to the source address the client actually uses toward the NAS
-  (a machine with several interfaces uses only one of them), and `all_admin`: with `root`, the client's
+  (a machine with several interfaces uses only one of them), and `all_admin`, which maps every user
+to the NAS admin account: with `root`, the client's
   uid had no NAS account and the share refused it. A rule naming the client's Tailscale address saved
   but the mount was refused; the cause is unconfirmed.
 - `SYNO.Core.ACL` v1 `get` with `{ file_path: "/<share>", type: "normal" }` answered 403 to an

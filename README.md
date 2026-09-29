@@ -75,11 +75,12 @@ verified write path, reads the NAS again, and exits 3 if any drift remains. The
 file declares a share (`vol_path`, `btrfs_cow`, `recycle_bin`, `encryption`,
 `support_snapshot`), the account that writes to it (`description`,
 `password_never_expire`, and a read-only share permission), and the share's
-snapshot schedule, Smart Retention counts and immutable window. The schedule's
+snapshot schedule, Smart Retention counts and immutable window, and optionally
+its complete NFS export rule set (`"rules": []` declares it not exported). The schedule's
 `repeat`, `repeat_hour`, `repeat_min` and `last_work_hour` are DSM's own fields,
 described in `docs/dsm-api-quirks.md`. Apply sets
-the permission, schedule, retention and immutability; creating the share or the
-account stays a DSM step. Unknown keys and wrong types are usage errors, so a
+the permission, schedule, retention, immutability and export rules; creating the
+share or the account, and turning the NFS service on, stay DSM steps. Unknown keys and wrong types are usage errors, so a
 typo cannot skip a check.
 
 ```json

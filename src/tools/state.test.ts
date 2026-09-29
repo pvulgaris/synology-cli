@@ -25,7 +25,12 @@ const EXPECTED: ExpectedState = {
     smart_recycle: { hourly: 24, daily: 7, weekly: 2, monthly: 1, yearly: 0 },
     immutable_days: 7,
   },
+  nfs: {
+    rules: [{ client: "192.0.2.10", privilege: "rw", root_squash: "all_admin", async: true, insecure: true, crossmnt: false }],
+  },
 };
+
+const SYS_ONLY = { kerberos: false, kerberos_integrity: false, kerberos_privacy: false, sys: true };
 
 type Responses = Record<string, any>;
 
@@ -54,6 +59,11 @@ function healthy(): Responses {
       name: "backups", policyType: 128, prefix: "Share#", schedule: { hour: 2 }, tid: -1,
     },
     "SYNO.DisasterRecovery.Retention.get_worm_lock": { worm_lock_enable: true, worm_lock_day: 7 },
+    "SYNO.Core.FileServ.NFS.SharePrivilege.load": {
+      rule: [{ async: true, client: "192.0.2.10", crossmnt: false, insecure: true, privilege: "rw", root_squash: "all_admin", security_flavor: { ...SYS_ONLY } }],
+    },
+    "SYNO.Core.FileServ.NFS.SharePrivilege.save": {},
+    "SYNO.Core.FileServ.NFS.get": { enable_nfs: true },
     "SYNO.Core.Share.Permission.set": {},
     "SYNO.Core.Share.Snapshot.set_schedule": {},
     "SYNO.DisasterRecovery.Retention.set": {},
@@ -120,6 +130,93 @@ test("state check: drift is reported per field and never applied", async () => {
     ]
   );
   assert.equal(posts(calls).length, 0);
+});
+
+test("state check: NFS export drift names each rule change", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule = [
+    { async: true, client: "192.0.2.10", crossmnt: false, insecure: false, privilege: "rw", root_squash: "root", security_flavor: { ...SYS_ONLY } },
+    { async: true, client: "198.51.100.7", crossmnt: false, insecure: true, privilege: "rw", root_squash: "all_admin", security_flavor: { ...SYS_ONLY } },
+  ];
+  const calls: SynologyCallOptions[] = [];
+  const result = await nasStateCheck(fakeClient(r, calls), EXPECTED);
+  assert.deepEqual(
+    result.findings.map((f) => [f.subject, f.fix, f.message]),
+    [
+      ["nfs", "api", 'export rules: 198.51.100.7 not declared, 192.0.2.10 root_squash is "root", 192.0.2.10 insecure is false'],
+    ]
+  );
+  assert.equal(posts(calls).length, 0);
+});
+
+test("state apply: a Kerberos export is reported for DSM, never rewritten to sys", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule[0].security_flavor = { ...SYS_ONLY, kerberos: true };
+  const expected = {
+    ...EXPECTED,
+    nfs: { rules: [...EXPECTED.nfs!.rules, { ...EXPECTED.nfs!.rules[0], client: "192.0.2.11" }] },
+  };
+  const calls: SynologyCallOptions[] = [];
+  const result = await nasStateApply(runtime(), fakeClient(r, calls), expected);
+  assert.deepEqual(
+    result.findings.map((f) => [f.fix, f.message]),
+    [["dsm", "export rules: 192.0.2.11 missing, 192.0.2.10 uses a security flavor other than sys"]]
+  );
+  assert.equal(posts(calls).length, 0);
+});
+
+test("state: a file without nfs never reads or writes export rules", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule = [];
+  const { nfs, ...withoutNfs } = EXPECTED;
+  const calls: SynologyCallOptions[] = [];
+  const result = await nasStateApply(runtime(), fakeClient(r, calls), withoutNfs);
+  assert.deepEqual(result, { ok: true, writes: [], findings: [] });
+  assert.ok(!calls.some((c) => c.api.startsWith("SYNO.Core.FileServ.NFS")));
+});
+
+test("state check: a rule load without a rule list is an error, not an empty export", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"] = {};
+  await assert.rejects(nasStateCheck(fakeClient(r, []), { ...EXPECTED, nfs: { rules: [] } }), /without a rule list/);
+});
+
+test("state check: declared exports with the NFS service off need DSM", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.get"].enable_nfs = false;
+  const result = await nasStateCheck(fakeClient(r, []), EXPECTED);
+  assert.deepEqual(result.findings.map((f) => [f.fix, f.message]), [["dsm", "the NFS service is off; turn it on in DSM"]]);
+  // With nothing exported, the service does not matter.
+  const unexported = healthy();
+  unexported["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule = [];
+  unexported["SYNO.Core.FileServ.NFS.get"].enable_nfs = false;
+  assert.equal((await nasStateCheck(fakeClient(unexported, []), { ...EXPECTED, nfs: { rules: [] } })).ok, true);
+});
+
+test("state check: a second rule for a declared client is drift", async () => {
+  const r = healthy();
+  const [first] = r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule;
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule = [{ ...first, privilege: "ro" }, first];
+  const result = await nasStateCheck(fakeClient(r, []), EXPECTED);
+  assert.deepEqual(result.findings.map((f) => f.message), ["export rules: 192.0.2.10 has 2 rules"]);
+});
+
+test("state apply: NFS rules are saved as the declared set, sys only, and [] unexports", async () => {
+  const r = healthy();
+  r["SYNO.Core.FileServ.NFS.SharePrivilege.load"].rule[0].root_squash = "root";
+  const calls: SynologyCallOptions[] = [];
+  const result = await nasStateApply(runtime(), fakeClient(r, calls), EXPECTED);
+  assert.equal(calls.find((c) => c.method === "load")!.params!.share_name, '"backups"');
+  // The rules the save overwrites stay in the output and the audit.
+  assert.equal((result.writes[0].previous as any[])[0].root_squash, "root");
+  const [save] = posts(calls);
+  assert.equal(`${save.api}.${save.method}`, "SYNO.Core.FileServ.NFS.SharePrivilege.save");
+  assert.equal(save.params!.share_name, '"backups"');
+  assert.deepEqual(JSON.parse(save.params!.rule as string), [{ ...EXPECTED.nfs!.rules[0], security_flavor: SYS_ONLY }]);
+
+  const unexport: SynologyCallOptions[] = [];
+  await nasStateApply(runtime(), fakeClient(r, unexport), { ...EXPECTED, nfs: { rules: [] } });
+  assert.deepEqual(posts(unexport).map((c) => [c.method, c.params!.rule]), [["save", "[]"]]);
 });
 
 test("state check: a share without snapshot support is one DSM finding", async () => {
@@ -217,4 +314,9 @@ test("parseExpectedState rejects what would silently skip a check", () => {
   reject((s) => (s.snapshots.time = "4:30"), /snapshots\.time must be "HH:MM"/);
   reject((s) => delete s.snapshots.repeat_hour, /snapshots\.repeat_hour is required/);
   reject((s) => delete s.snapshots.smart_recycle.yearly, /snapshots\.smart_recycle must be/);
+  reject((s) => (s.nfs.rules[0].root_squash = "root_squash"), /nfs\.rules must be/);
+  reject((s) => delete s.nfs.rules[0].insecure, /nfs\.rules must be/);
+  reject((s) => s.nfs.rules.push({ ...s.nfs.rules[0] }), /nfs\.rules must be/);
+  reject((s) => (s.nfs.rules[0].client = "192.0.2.10 "), /nfs\.rules must be/);
+  reject((s) => delete s.nfs.rules, /nfs\.rules is required/);
 });
