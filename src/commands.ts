@@ -73,6 +73,8 @@ const RAW_READ_ONLY_CALLS = new Set([
   "SYNO.Virtualization.Guest.read_ovf",
   "SYNO.Virtualization.Cluster.get_total_progress",
   "SYNO.Docker.Container.stats",
+  "SYNO.Core.Share.Snapshot.get_schedule",
+  "SYNO.DisasterRecovery.Retention.get_worm_lock",
 ]);
 
 function rawCallMayMutate(api: string, method: string, post: boolean): boolean {

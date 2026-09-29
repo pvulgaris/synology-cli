@@ -154,6 +154,19 @@ test("gate: raw read methods are free but POST is gated", () => {
   assert.equal(requiresConfirmation(raw, { post: true }), true);
 });
 
+test("gate: the snapshot schedule and immutable-window getters are reads", () => {
+  const raw = byName("raw");
+  for (const [api, method] of [
+    ["SYNO.Core.Share.Snapshot", "get_schedule"],
+    ["SYNO.DisasterRecovery.Retention", "get_worm_lock"],
+  ]) {
+    assert.equal(requiresConfirmation(raw, {}, [api, method]), false);
+  }
+  // The setters on the same APIs stay gated.
+  assert.equal(requiresConfirmation(raw, { post: true }, ["SYNO.Core.Share.Snapshot", "set_schedule"]), true);
+  assert.equal(requiresConfirmation(raw, {}, ["SYNO.DisasterRecovery.Retention", "set_worm_lock"]), true);
+});
+
 test("gate: known read-only VMM discovery calls do not require confirmation", () => {
   const raw = byName("raw");
   for (const method of ["list_resource", "check_availability", "gen_mac"]) {
