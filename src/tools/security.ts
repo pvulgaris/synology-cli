@@ -13,7 +13,7 @@
  * SYNO.Core.User.PasswordPolicy           — password policy (v1)
  */
 
-import type { SynoClient } from "../client.js";
+import { errorMessage, type SynoClient } from "../client.js";
 import { readSource, readWarnings } from "./partial.js";
 
 const SCAN_POLL_MS = 2000;
@@ -237,7 +237,7 @@ export async function nasFirewallList(dsm: SynoClient) {
     } catch (err) {
       warnings.push({
         source: "dos_protection",
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
     }
   }

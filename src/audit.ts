@@ -12,6 +12,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { RuntimeConfig } from "./config.js";
+import { errorMessage } from "./client.js";
 
 export interface AuditRecord {
   ts: string;
@@ -48,7 +49,7 @@ export async function withAudit(
     result = await fn(ctx);
     return { after: result.after, ok: result.ok };
   } catch (err: any) {
-    thrownError = String(err?.message ?? err);
+    thrownError = errorMessage(err);
     throw err;
   } finally {
     await recordWrite(cfg, {

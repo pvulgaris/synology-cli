@@ -1,3 +1,5 @@
+import { errorMessage } from "../client.js";
+
 export interface ReadSource<T> {
   source: string;
   value: T | null;
@@ -14,7 +16,7 @@ export async function readSource<T>(
     return {
       source,
       value: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: errorMessage(err),
     };
   }
 }

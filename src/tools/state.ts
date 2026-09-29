@@ -22,7 +22,7 @@
  */
 
 import type { RuntimeConfig } from "../config.js";
-import type { SynoClient } from "../client.js";
+import { errorMessage, type SynoClient } from "../client.js";
 import { withAudit } from "../audit.js";
 import { nasSharesList } from "./shares.js";
 import { nasUsersList } from "./security.js";
@@ -321,7 +321,7 @@ export async function nasStateApply(runtime: RuntimeConfig, dsm: SynoClient, exp
       // One failed setter must not skip the rest.
       const writes: Finding[] = [];
       for (const f of before.filter((f) => f.set)) {
-        const error = await f.set!().then(() => undefined, (err) => String(err?.message ?? err));
+        const error = await f.set!().then(() => undefined, (err) => errorMessage(err));
         writes.push({ ...f, error });
       }
       // Recorded before the re-read, so the audit still names the writes if

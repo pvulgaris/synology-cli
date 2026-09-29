@@ -14,6 +14,7 @@ import type { RuntimeConfig } from "../config.js";
 import type { SynoClient } from "../client.js";
 import {
   SynologyApiError,
+  errorMessage,
   isSensitiveParamKey,
   isSoftTransportError,
 } from "../client.js";
@@ -478,7 +479,7 @@ async function containerMutation(
     return null;
   } catch (err) {
     if (!isSoftTransportError(err)) throw err;
-    return String((err as Error).message ?? err);
+    return errorMessage(err);
   }
 }
 
@@ -622,7 +623,7 @@ async function projectMutation(
     return null;
   } catch (err) {
     if (!ambiguousProjectError(err)) throw err;
-    return String((err as Error).message ?? err);
+    return errorMessage(err);
   }
 }
 
