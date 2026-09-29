@@ -76,8 +76,8 @@ file declares a share (`vol_path`, `btrfs_cow`, `recycle_bin`, `encryption`,
 `support_snapshot`), the account that writes to it (`description`,
 `password_never_expire`, and a read-only share permission), and the share's
 snapshot schedule, Smart Retention counts and immutable window. The schedule's
-`repeat`, `repeat_hour`, `repeat_min` and `last_work_hour` are DSM's own fields;
-once a day is all zeros with `last_work_hour` equal to the start hour. Apply sets
+`repeat`, `repeat_hour`, `repeat_min` and `last_work_hour` are DSM's own fields,
+described in `docs/dsm-api-quirks.md`. Apply sets
 the permission, schedule, retention and immutability; creating the share or the
 account stays a DSM step. Unknown keys and wrong types are usage errors, so a
 typo cannot skip a check.
