@@ -241,7 +241,7 @@ export const COMMANDS: RegisteredCommand[] = [
   {
     name: "state check",
     summary:
-      "Compare the NAS with an expected-state JSON file (share, account, permission, snapshot schedule/retention/immutability). Exits 3 on drift.",
+      "Compare the NAS with an expected-state JSON file (share, account, permission, snapshot schedule/retention/immutability, NFS export rules). Exits 3 on drift.",
     platforms: DSM,
     args: ["file"],
     run: (ctx) => nasStateCheck(ctx.client, expectedState(arg(ctx, 0))),
@@ -250,7 +250,7 @@ export const COMMANDS: RegisteredCommand[] = [
   {
     name: "state apply",
     summary:
-      "Converge the NAS to an expected-state JSON file where a verified write exists (share permission, snapshot schedule, retention, immutability), then re-read it; drift with fix \"dsm\" needs the DSM UI. Exits 3 if drift remains.",
+      "Converge the NAS to an expected-state JSON file where a verified write exists (share permission, snapshot schedule, retention, immutability, and a declared NFS rule set, which replaces the share's rules; \"rules\": [] unexports it), then re-read it; drift with fix \"dsm\" needs the DSM UI. Exits 3 if drift remains.",
     platforms: DSM,
     args: ["file"],
     mutating: true,

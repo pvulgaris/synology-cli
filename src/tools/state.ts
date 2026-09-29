@@ -16,6 +16,16 @@
  *   a live set of advYearly=1 with yearly=1 read back advYearly 1, yearly 0.
  * SYNO.DisasterRecovery.Retention get_worm_lock/set_worm_lock v1:
  *   { type: "Share", name, worm_lock_enable, worm_lock_day }.
+ * SYNO.Core.FileServ.NFS.SharePrivilege load/save v1, driven with `syno raw`
+ *   and read back on 2026-09-29: both take `share_name` (`name` answers 2301,
+ *   and a share that does not exist answers 2370); save replaces the share's
+ *   whole rule set; each rule is { client, privilege, root_squash, async,
+ *   insecure, crossmnt, security_flavor: { kerberos, kerberos_integrity,
+ *   kerberos_privacy, sys } }.
+ * SYNO.Core.FileServ.NFS get v1: { enable_nfs, ... }. `root_squash` names who is mapped to what: "root" means no
+ *   mapping, "admin"/"guest" map root only, and "all_admin"/"all_guest" map
+ *   every user. An unknown value answers 2301. DSM stores `client` exactly as
+ *   sent, rejects a rule missing a field, and accepts two rules for one client.
  *
  * The share and the account are never created here: DSM's create dialogs are
  * the honest path for two things that happen once per NAS.
@@ -56,7 +66,23 @@ export interface ExpectedState {
     smart_recycle?: Counts;
     immutable_days?: number;
   };
+  /** The share's complete NFS export rule set; `[]` declares "not exported". */
+  nfs?: { rules: NfsRule[] };
 }
+
+// All five saved and read back on DSM 7.4.1; "root_squash" and "map_root" answer 2301.
+const SQUASH = ["root", "admin", "guest", "all_admin", "all_guest"] as const;
+interface NfsRule {
+  client: string;
+  privilege: "rw" | "ro";
+  root_squash: (typeof SQUASH)[number];
+  async: boolean;
+  insecure: boolean;
+  crossmnt: boolean;
+}
+const NFS_RULE_KEYS = ["client", "privilege", "root_squash", "async", "insecure", "crossmnt"] as const;
+// The only security flavor this file writes, and so the only one a check accepts.
+const SYS_ONLY = { kerberos: false, kerberos_integrity: false, kerberos_privacy: false, sys: true };
 
 export interface Finding {
   subject: string;
@@ -67,11 +93,13 @@ export interface Finding {
   set?: () => Promise<unknown>;
   /** Set by apply when the setter threw. */
   error?: string;
+  /** What the setter overwrites wholesale, kept so the audit can rebuild it. */
+  previous?: unknown;
 }
 
 // A misspelled key would silently skip its check and report a clean NAS, so
 // the file is validated strictly: unknown keys and wrong types are errors.
-type Kind = "string" | "boolean" | "count" | "time" | "days" | "counts";
+type Kind = "string" | "boolean" | "count" | "time" | "days" | "counts" | "nfs_rules";
 const FIELDS: Record<string, Record<string, Kind>> = {
   share: {
     name: "string",
@@ -93,11 +121,13 @@ const FIELDS: Record<string, Record<string, Kind>> = {
     smart_recycle: "counts",
     immutable_days: "count",
   },
+  nfs: { rules: "nfs_rules" },
 };
 const REQUIRED: Record<string, string[]> = {
   share: ["name"],
   account: ["name"],
   snapshots: ["enabled", "time", "week_days", "repeat", "repeat_hour", "repeat_min", "last_work_hour"],
+  nfs: ["rules"],
 };
 const isCount = (v: unknown) => Number.isInteger(v) && (v as number) >= 0;
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -114,6 +144,24 @@ const VALID: Record<Kind, [string, (v: unknown) => boolean]> = {
   counts: [
     `{ ${TIERS.join(", ")} } counts`,
     (v) => isObject(v) && Object.keys(v).length === TIERS.length && TIERS.every((t) => isCount(v[t])),
+  ],
+  nfs_rules: [
+    `rules with exactly ${NFS_RULE_KEYS.join(", ")}, one per client; privilege "rw" or "ro"; root_squash one of ${SQUASH.join(", ")}`,
+    (v) =>
+      Array.isArray(v) &&
+      new Set(v.map((r) => (isObject(r) ? r.client : undefined))).size === v.length &&
+      v.every(
+        (r) =>
+          isObject(r) &&
+          Object.keys(r).length === NFS_RULE_KEYS.length &&
+          typeof r.client === "string" &&
+          /^\S+$/.test(r.client) &&
+          (r.privilege === "rw" || r.privilege === "ro") &&
+          (SQUASH as readonly unknown[]).includes(r.root_squash) &&
+          typeof r.async === "boolean" &&
+          typeof r.insecure === "boolean" &&
+          typeof r.crossmnt === "boolean"
+      ),
   ],
 };
 
@@ -146,8 +194,8 @@ const weekName = (days: number[]) => [...days].sort((a, b) => a - b).join(",");
 
 async function evaluate(dsm: SynoClient, expected: ExpectedState): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const drift = (subject: string, message: string, set?: Finding["set"]) => {
-    findings.push({ subject, message, fix: set ? "api" : "dsm", set });
+  const drift = (subject: string, message: string, set?: Finding["set"], previous?: unknown) => {
+    findings.push({ subject, message, fix: set ? "api" : "dsm", set, ...(previous === undefined ? {} : { previous }) });
   };
 
   const share = expected.share;
@@ -301,6 +349,59 @@ async function evaluate(dsm: SynoClient, expected: ExpectedState): Promise<Findi
           })
         );
       }
+    }
+  }
+
+  const nfs = expected.nfs;
+  if (nfs) {
+    const loaded = await dsm.call({
+      api: "SYNO.Core.FileServ.NFS.SharePrivilege",
+      method: "load",
+      version: 1,
+      params: { share_name: q(share.name) },
+    });
+    // A missing list would read as "not exported" and pass a declared [].
+    if (!Array.isArray(loaded?.rule)) throw new Error(`NFS rules for ${share.name} came back without a rule list`);
+    const liveList: Array<Record<string, any>> = loaded.rule;
+    const liveRules = new Map(liveList.map((r) => [r.client, r]));
+    const clients = new Set(nfs.rules.map((r) => r.client));
+    const changes: string[] = [...liveRules.keys()].filter((c) => !clients.has(c)).map((c) => `${c} not declared`);
+    // The map keeps one rule per client, so count the rest here; a file never
+    // declares a client twice.
+    const counts = new Map<string, number>();
+    for (const r of liveList) counts.set(r.client, (counts.get(r.client) ?? 0) + 1);
+    for (const [client, n] of counts) if (n > 1) changes.push(`${client} has ${n} rules`);
+    for (const rule of nfs.rules) {
+      const have = liveRules.get(rule.client);
+      if (!have) changes.push(`${rule.client} missing`);
+      else for (const key of NFS_RULE_KEYS) {
+        if (have[key] !== rule[key]) changes.push(`${rule.client} ${key} is ${JSON.stringify(have[key])}`);
+      }
+    }
+    // save writes sys only, so a rule using Kerberos would be silently weakened:
+    // report it and leave every rule change on this share to DSM.
+    const secured = liveList
+      .filter((r) => !Object.entries(SYS_ONLY).every(([k, v]) => r.security_flavor?.[k] === v))
+      .map((r) => r.client);
+    for (const client of secured) changes.push(`${client} uses a security flavor other than sys`);
+    if (changes.length) {
+      const save = () =>
+        dsm.call({
+          api: "SYNO.Core.FileServ.NFS.SharePrivilege",
+          method: "save",
+          version: 1,
+          post: true,
+          params: {
+            share_name: q(share.name),
+            rule: q(nfs.rules.map((r) => ({ ...r, security_flavor: SYS_ONLY }))),
+          },
+        });
+      drift("nfs", `export rules: ${changes.join(", ")}`, secured.length ? undefined : save, liveList);
+    }
+    // Rules can match while every mount fails because the service is off.
+    if (nfs.rules.length) {
+      const service = await dsm.call({ api: "SYNO.Core.FileServ.NFS", method: "get", version: 1 });
+      if (!service?.enable_nfs) drift("nfs", "the NFS service is off; turn it on in DSM");
     }
   }
 
