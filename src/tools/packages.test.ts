@@ -18,6 +18,7 @@ import type { RuntimeConfig } from "../config.js";
 import type { SynoClient, SynologyCallOptions } from "../client.js";
 import {
   nasPackageInstall,
+  nasPackageUpdate,
   nasPackageUninstall,
   nasPackageControl,
   nasPackageInfo,
@@ -309,6 +310,54 @@ test("nas_packages_check_updates: pending entries carry the real display name", 
   assert.deepEqual(res.pending, [
     { id: "Tailscale", name: "Tailscale", installed_version: "1.58.2-700058000", available_version: "1.58.2-700058002", changelog: "", beta: false },
   ]);
+});
+
+// Regression: the catalog can list an older build than the one installed (live:
+// HybridShare 1.6.0-2023 installed, 1.5.2-1832 listed). Any difference used to
+// count as pending, so check reported the downgrade and update would install it.
+const VERSIONS: Array<[id: string, installed: string, catalog: string]> = [
+  ["Older", "1.6.0-2023", "1.5.2-1832"], // lower minor, higher build: not an update
+  ["OlderBuild", "2.7.0-12229", "2.7.0-12000"],
+  ["Equal", "1.0.0-1000", "1.0.0-1000"],
+  ["Newer", "2.7.0-12229", "2.8.0-13004"],
+  ["NewerBuild", "1.58.2-700058000", "1.58.2-700058002"],
+  ["TwoDigit", "1.9.0-1", "1.10.0-1"], // numeric, not string, comparison
+  ["PadsDots", "1.6-5", "1.6.1-5"],
+  ["Unparsed", "2024.q3", "2024.q4"], // unknown format: differs is still reported
+];
+
+function makeVersionsFake(calls: SynologyCallOptions[] = []) {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
+    calls.push(opts);
+    if (opts.api === "SYNO.Core.Package.Server" && opts.method === "list") {
+      return {
+        packages: VERSIONS.map(([id, , version]) => ({ id, dname: id, version, link: "http://x/p.spk", md5: "m", size: 1 })),
+      };
+    }
+    if (opts.api === "SYNO.Core.Package" && opts.method === "list") {
+      return { packages: VERSIONS.map(([id, version]) => ({ id, name: id, version, additional: {} })) };
+    }
+    throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+  };
+  return { call } as unknown as SynoClient;
+}
+
+test("nas_packages_check_updates: only a higher catalog version is pending", async () => {
+  const res = await nasPackagesCheckUpdates(makeVersionsFake());
+  assert.deepEqual(
+    res.pending.map((p) => p.id),
+    ["Newer", "NewerBuild", "TwoDigit", "PadsDots", "Unparsed"]
+  );
+});
+
+test("update: refuses a downgrade before any write, and names the reason", async () => {
+  const calls: SynologyCallOptions[] = [];
+  await assert.rejects(
+    nasPackageUpdate(cfg, makeVersionsFake(calls), { name: "Older" }),
+    /is at 1\.6\.0-2023, newer than the catalog's 1\.5\.2-1832; not downgrading/
+  );
+  await assert.rejects(nasPackageUpdate(cfg, makeVersionsFake(calls), { name: "Equal" }), /already at the latest/);
+  assert.equal(calls.filter((c) => c.post).length, 0);
 });
 
 // The normalizer is the one place the dname→id fallback lives, so a catalog row

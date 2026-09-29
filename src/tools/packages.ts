@@ -250,6 +250,29 @@ export async function nasPackagesList(dsm: SynoClient) {
   };
 }
 
+/** Package Center versions read "1.6.0-2023": dotted numbers, then a build number. */
+function parseVersion(v: string): { dots: number[]; build: number } | null {
+  const m = /^(\d+(?:\.\d+)*)(?:-(\d+))?$/.exec(v);
+  return m ? { dots: m[1].split(".").map(Number), build: Number(m[2] ?? 0) } : null;
+}
+
+/**
+ * Whether the catalog version is an upgrade over the installed one. The catalog
+ * is not always ahead: it can list an older build than the one installed, and
+ * treating any difference as an update reports (and would install) a downgrade.
+ */
+function isNewerVersion(available: string, installed: string): boolean {
+  const a = parseVersion(available);
+  const b = parseVersion(installed);
+  // An unrecognized format must not hide an update, so it falls back to "differs".
+  if (!a || !b) return available !== installed;
+  for (let i = 0; i < Math.max(a.dots.length, b.dots.length); i++) {
+    const diff = (a.dots[i] ?? 0) - (b.dots[i] ?? 0);
+    if (diff) return diff > 0;
+  }
+  return a.build > b.build;
+}
+
 export async function nasPackagesCheckUpdates(dsm: SynoClient) {
   const [installed, catalog] = await Promise.all([
     dsm.call<PackageListResp>({
@@ -273,7 +296,7 @@ export async function nasPackagesCheckUpdates(dsm: SynoClient) {
     if (HARD_REFUSE_NAMES.has(p.id)) continue;
     const installedVersion = installedVersionById.get(p.id);
     if (!installedVersion) continue;
-    if (installedVersion === p.version) continue;
+    if (!isNewerVersion(p.version, installedVersion)) continue;
     const info = normalizeCatalogPackage(p);
     pending.push({
       id: info.id,
@@ -802,9 +825,11 @@ export async function nasPackageUpdate(
       `Package "${args.name}" is not installed. Use "syno packages install" for fresh installs.`
     );
   }
-  if (catalog.version === before.version) {
+  if (!isNewerVersion(catalog.version, before.version)) {
     throw new Error(
-      `Package "${args.name}" is already at the latest version (${before.version}); no update available.`
+      catalog.version === before.version
+        ? `Package "${args.name}" is already at the latest version (${before.version}); no update available.`
+        : `Package "${args.name}" is at ${before.version}, newer than the catalog's ${catalog.version}; not downgrading.`
     );
   }
 
