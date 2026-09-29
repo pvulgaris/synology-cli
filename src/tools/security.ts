@@ -107,7 +107,9 @@ export async function nasSecurityAdvisorScan(dsm: SynoClient) {
  * known sentinels fails toward active AND flags itself `indeterminate`, rather
  * than guessing. `Date.parse` is deliberately NOT used: it reads "0", "1", or
  * "2026" as valid past dates and would silently mark such an account disabled,
- * suppressing its findings. See docs/dsm-api-quirks.md ("`expired` field").
+ * suppressing its findings. If the dated format is ever confirmed live,
+ * classify it with a strict format check and a whole-day, timezone-safe
+ * comparison.
  */
 export function userActive(
   expired: unknown

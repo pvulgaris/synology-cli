@@ -2,6 +2,8 @@
 
 Consolidated notes on the Synology DSM 7 Web API surface, derived from live probing and reverse-engineering work on this project. Read before adding new tools, debugging unexpected `code:` errors, or interpreting `SYNO.API.Info` output.
 
+What belongs here: rules that apply across the API, dead ends worth not repeating, and behavior of endpoints no code uses yet. What a value or response field means for code that reads it is a comment at that line, not an entry here; when a raw note becomes a named command, move its details into the code and delete the entry.
+
 ## Error codes
 
 DSM error codes are NOT what they sound like — verified against [N4S4/synology-api's `error_codes.py`](https://github.com/N4S4/synology-api/blob/master/synology_api/error_codes.py) and our live probing:
@@ -26,7 +28,7 @@ DSM error codes are NOT what they sound like — verified against [N4S4/synology
 
 ## Virtual Machine Manager observations
 
-The following `SYNO.Virtualization.Guest` v1 calls were observed to return discovery data without changing persistent VMM state. The raw-command confirmation policy treats only these exact API and method pairs as read-only exceptions:
+The following `SYNO.Virtualization.Guest` v1 calls were observed to return discovery data without changing persistent VMM state:
 
 - `list_resource`
 - `check_availability`
@@ -34,24 +36,7 @@ The following `SYNO.Virtualization.Guest` v1 calls were observed to return disco
 - `read_ovf`, which requires POST and parses an OVA already present on DSM
 
 `SYNO.Virtualization.Cluster.get_total_progress` v1 is also a read-only poll.
-It reports progress for a supplied `prefix`, such as `virtualization_guest`,
-and is an exact raw-command confirmation exception.
-
-## Container Manager observations
-
-`SYNO.Docker.Container.stats` v1 is a GET read that returns Docker stats keyed
-by container ID. Each record includes the container name and raw CPU, memory,
-network, and block-I/O counters. Stopped containers remain in the response with
-empty counters and a zero-date `read` timestamp. CPU percentage requires two
-snapshots because DSM returns an empty `precpu_stats` record.
-The raw-command confirmation policy treats this exact endpoint as a read-only
-exception because `stats` is not otherwise a recognized read method name.
-
-`SYNO.Docker.Container.get` v1 accepts a JSON-quoted `name` and returns
-`{details, profile}`. Both branches may include environment values and command
-arguments, so named reads suppress raw response tracing. The supported
-`containers info` output omits environment values and redacts secret-shaped
-command options.
+It reports progress for a supplied `prefix`, such as `virtualization_guest`.
 
 ## Provisional network API observations
 
@@ -110,43 +95,6 @@ The biggest footgun: where `additional[]` keys appear in the response varies by 
 
 Always probe with `DEBUG_DSM_RESPONSES=1` and look at the raw shape before mapping fields.
 
-**`SYNO.Core.User.list` `expired` field — dated form is unverified.** Known values are `"normal"`
-(active) and `"now"` (disabled; this is how "Disable this account" manifests). DSM is understood to
-also put a *date* here for a scheduled expiration, but the exact format has never been observed on a
-live DSM, and a date-only value can't be judged reliably without the NAS's timezone. So `userActive`
-(`tools/security.ts`) classifies only the two known sentinels and flags everything else
-`active_indeterminate` rather than guessing. Do NOT reach for `Date.parse` here: it reads `"0"`,
-`"1"`, `"2026"` as valid past dates and would silently mark such an account disabled, suppressing the
-audit findings this is meant to make reliable. If the dated format is ever confirmed live, classify it
-with a strict format check plus a whole-day, timezone-safe comparison, not `Date.parse`.
-
-**`SYNO.Core.Package.Server.list` (the catalog, not the installed-package list) uses its own field
-names, not the ones you'd guess from `Package.list` or the Package Center UI's labels:** display
-name is `dname` (not `name`), publisher is `maintainer` (not `publisher`), description is `desc`
-(not `description`), and dependencies are `deppkgs` (a `{pkgId: versionConstraint}` map or `null`
-— not `depend_packages`). There is no `install_dep_packages` field on this endpoint at all;
-`Installation.get_queue` is the resolved-plan source of truth (see the write-flow section in
-CLAUDE.md). `nas_package_info` and `nas_packages_check_updates` shipped for a while silently
-mapping the wrong keys — `JSON.stringify` drops `undefined` fields, so the gap only surfaced via a
-live smoke test, not a type error (`dsm.call<T>()` performs an unchecked cast, so a wrong field
-name in the TS interface never fails at compile time). `changelog`, `size`, and `beta` happen to be
-named the same on both endpoints, which is what let the bug hide for the fields that did work.
-
-## API name + method discoveries
-
-These took multiple sessions to pin down:
-
-- **HTTPS-redirect / HSTS**: `SYNO.Core.Web.DSM` v=2 `get` (no params)
-- **TLS profile per service**: `SYNO.Core.Web.Security.TLSProfile` v=1 `get`
-- **DoS protection**: `SYNO.Core.Security.DoS` v=2 `get` with `configs=[{adapter},...]`
-- **Network interfaces (for the `configs=` pattern)**: `SYNO.Core.Network.Interface` v=1 `list`
-- **Firewall rules per profile**: list profiles via `SYNO.Core.Security.Firewall.Profile` v=1 `list`, then `get` per `name`. There is NO `Firewall.Rules.list`.
-- **AutoBlock entries**: `SYNO.Core.Security.AutoBlock.Rules` v=1 `list` with `type=allow|deny` AND `offset`/`limit`. Missing any param → 5100.
-- **Port forwarding**: `SYNO.Core.PortForwarding.Rules` v=1 `load` (NOT `list`). Returns a bare array.
-- **Package stop/start/restart**: `SYNO.Core.Package.Control` v=1 with `method=stop|start|restart`, POST, `id=<pkg>`.
-- **Security Advisor scan**: `SYNO.Core.SecurityScan.Operation` v=1 `start` (POST, `items=ALL`) → poll `SYNO.Core.SecurityScan.Status` v=1 `system_get` until `sysProgress>=100` → fetch findings via `rule_get` (`items=ALL`).
-- **QuickConnect state**: `SYNO.Core.QuickConnect` v=2 `get` for master toggle + alias; v=3 `get_misc_config` for `relay_enabled`.
-
 ## Version negotiation
 
 Reference implementations ([N4S4/synology-api](https://github.com/N4S4/synology-api), [gaetangr/synaudit](https://github.com/gaetangr/synaudit), Home Assistant's [py-synologydsm-api](https://github.com/mib1185/py-synologydsm-api)) all query `SYNO.API.Info?query=all` once at startup and use `maxVersion` per API. This repo doesn't — every tool hardcodes the version it was developed against, because the alternative (negotiating per startup) added a cold-start round-trip and a class of "max version returns a shape this code doesn't understand" failures we'd rather catch via a HAR capture. If a future DSM bump breaks a hardcoded version, surface it as an explicit code change, not a silent floor shift.
@@ -164,31 +112,12 @@ This is why `tools/packages.ts` wraps string params in `JSON.stringify()` everyw
 ## Other reverse-engineered patterns
 
 - **Docker image upload URL** (used by `Project.build` for tar imports): `/webapi/entry.cgi/SYNO.Docker.Image?api=SYNO.Docker.Image&method=upload&version=1` — the API name is embedded as a URL **path segment**, not just a query param. The multipart-form field carrying the file body is named `filename`. Required header: `X-SYNO-TOKEN` (mandatory on mutating `SYNO.Docker.*` and `SYNO.Core.Package.*` endpoints; without it you get code 119).
-- **Container and image lists require pagination**: `SYNO.Docker.Container list` needs `offset=0`, `limit=<n>`, and `type="all"`; `SYNO.Docker.Image list` needs `offset=0` and `limit=<n>`. Omitting them returns code 114 rather than a default page.
-- **Project update does not recreate containers**: `SYNO.Docker.Project update` replaces the stored Compose content, but `start` then starts the old containers. Stop, update, and call `build` to converge containers to the new definition.
-- **Project build does not remove orphans**: Container Manager's Compose wrapper does not pass `--remove-orphans`. A service removed from the Compose document can remain as an exited or restarted container until explicitly deleted.
-- **Project code 1202 is ambiguous**: a build with a successful one-shot service can return 1202 and set project status `WARNING` while the service exited 0 and the long-running containers are healthy. Stop can also return 1202 after stopping containers. Poll the project and verify container running/health/exit state before deciding success or failure.
-- **Container logs are a read over POST**: `SYNO.Docker.Container.Log get`, POST, needs `name`, `sort_dir`, `offset`, and `limit`. Do not classify it as a mutation solely because it uses POST.
-- **Image deletion is not wrapped**: Container Manager 24.0.2 rejected the documented private `SYNO.Docker.Image delete` parameter forms. Keep image removal out of named commands until its contract is verified on the current DSM build. Do not work around it by exposing the Docker socket through this CLI.
-- **TOTP code reuse window**: DSM rejects the same TOTP code within ~30 seconds. The error is code 404 "Failed to authenticate 2-factor authentication code." Persist the post-login SID (e.g. via `DSM_SID_CACHE_FILE`) across rapid dev iteration so you don't burn a new code per process.
-- **SMB protocol enum is 0-indexed** (`SYNO.Core.FileServ.SMB` → `smb_min_protocol` / `smb_max_protocol`): `0`=SMB1, `1`=SMB2, `2`=SMB2+Large MTU, `3`=SMB3. So a `smb_min_protocol` of **1 is SMB2, not SMB1** — SMB1 is only permitted when the minimum is `0`. The `max_protocol: 3` (SMB3, the default ceiling) is the tell that the scale is 0-based. Deriving "SMB1 enabled" from `<= 1` is an off-by-one that mis-flags a healthy SMB2 minimum as a critical finding (`security.ts` `enable_smb1`; skill audit rule `synology.smb.smb1_enabled`).
-- **TLS profile levels are INVERSELY numbered** (`SYNO.Core.Web.Security` / `SYNO.Core.Security.TLSProfile` → `default-level`, per-service `current-level`): `0`=Modern (strongest), `1`=Intermediate, `2`=Old/Compatible (weakest). Verified against a live NAS: a `dsm` service at `current-level: 0` accepts only TLS 1.2/1.3 with PFS+AEAD ciphers and rejects all CBC/SHA1/3DES. So a service is **downgraded (weaker) when `current-level > default-level`**, not less — the intuitive "higher number = stronger" is backwards here. Same misread class as the SMB enum: it made a hardened service (level 0 under a default of 2) look downgraded.
-- **Mail notification recipients moved to `profiles` in DSM 7.3** (`SYNO.Core.Notification.Mail.Conf` → call at **version 2**, not 1): the legacy flat `mail` array is now always `[]`; the actual recipients live in a `profiles` list ("Recipient Profiles" in the UI), each `{ target_type: "mail", target_name: "<label>", target_config: { mail: "<addr>" } }`. Counting the v1 `mail` array reports zero recipients even when one is configured — verified from a DSM UI HAR. Read `data.profiles` filtered to `target_type === "mail"`, and take the address from `target_config.mail` (the authoritative address) rather than `target_name` (a display label that may differ). Because DSM predating 7.3 may not serve v2 at all, **call v2 first and fall back to a real v1 `get`** (which returns the flat `mail` array) — don't rely on the `mail` field inside a v2 response for older DSM, since a v2-unsupported error nulls the whole response. The other fields (`enable_mail`, `enable_oauth`, `smtp_info.*`, `sender_mail`, `subject_prefix`) are unchanged between v1 and v2.
+- **Image deletion is not wrapped** in a named command. The working raw form is in the `SYNO.Docker.Image` delete section below. Do not work around the gap by exposing the Docker socket through this CLI.
 
-## Btrfs snapshot config: summary on `SYNO.Core.Share`, writes elsewhere
+## Btrfs snapshot schedule and retention
 
-Discovered live on 2026-07-20 against DSM 7.3.2-86009 Update 4. Finding the schedule and retention
-policy for a share's snapshots costs a session if you start from the obvious API, so start here.
-
-**Task config (schedule + retention) is an `additional` field on `SYNO.Core.Share` `get` v1**, requested
-as `additional=["snapshot_info"]`. The response carries:
-
-- `snapshot_info.retention` is the Smart Recycle GFS policy: `advHourly`, `advDaily`, `advWeekly`,
-  `advMonthly`, `advYearly`, plus `advPolicyType`, `retainDay`, `policyType`.
-- `snapshot_info.schedule` carries `hour`, `min`, `week_name`, `date_type`, `next_trigger_time`.
-
-`next_trigger_time` is the practical "the schedule is enabled" signal. There is no separate enabled
-flag, so a share with no scheduled snapshots is one with no next trigger.
+`shares snapshot-config` reads the summary from `SYNO.Core.Share get` `snapshot_info`; `state` reads and
+writes the pieces below. Both call sites describe the fields they use.
 
 **The schedule is writable on `SYNO.Core.Share.Snapshot` after all.** `get_schedule`/`set_schedule`
 exist at **v1 only**; v2 answers 103, which is why an earlier probe of this API concluded it had no
@@ -264,9 +193,6 @@ worm lock above.
 NAS that sends backups to C2 rather than receiving replication they return 1001 / 3000 regardless of
 params. Those codes read like a missing or malformed parameter and aren't. Adding params won't help.
 
-**Per-snapshot immutability** (`immutable`, `immutable_days`, `immutable_until`, `scheduled`,
-`user_locked`) comes from `SYNO.Core.Share.Snapshot list` at **v2**, which `syno shares snapshots`
-already wraps.
 
 ## `SYNO.Docker.Image` delete wants plural `tags`, an array
 

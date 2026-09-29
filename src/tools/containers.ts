@@ -230,6 +230,7 @@ export async function nasContainerProjectsList(dsm: SynoClient) {
 }
 
 export async function nasContainersList(dsm: SynoClient) {
+  // offset, limit and type are all required; omitting them returns code 114.
   const data = await dsm.call<ContainerListWire>({
     api: "SYNO.Docker.Container",
     method: "list",
@@ -311,6 +312,11 @@ export async function nasContainerInfo(dsm: SynoClient, nameInput: string) {
   };
 }
 
+/**
+ * `stats` is a GET read keyed by container ID. Stopped containers stay in the
+ * response with empty counters and a zero-date `read`, and `precpu_stats` is
+ * always empty, so CPU percentage needs two calls.
+ */
 async function readContainerStats(dsm: SynoClient): Promise<ContainerStatsListWire> {
   return dsm.call<ContainerStatsListWire>({
     api: "SYNO.Docker.Container",
@@ -547,6 +553,7 @@ export async function nasContainerRemove(
 }
 
 export async function nasContainerImagesList(dsm: SynoClient) {
+  // offset and limit are required; omitting them returns code 114.
   const data = await dsm.call<ImageListWire>({
     api: "SYNO.Docker.Image",
     method: "list",
@@ -591,6 +598,9 @@ async function waitForProject(
   });
 }
 
+// Build and stop can return 1202 after doing the work: a build whose one-shot
+// service exited 0 sets project status WARNING while the long-running
+// containers are healthy. So 1202 means "verify", never success or failure.
 function ambiguousProjectError(err: unknown): boolean {
   if (err instanceof SynologyApiError) return err.code === 1202;
   return isSoftTransportError(err);
@@ -651,6 +661,9 @@ export async function nasContainerProjectDeploy(
         }
       }
 
+      // update only replaces the stored Compose content; start would reuse the
+      // old containers, so build is what converges them. Build does not pass
+      // --remove-orphans, so a removed service can survive it.
       await dsm.call({
         api: "SYNO.Docker.Project",
         method: "update",

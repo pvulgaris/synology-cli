@@ -78,7 +78,7 @@ SRM is independent of DSM. An SRM-only command loads only `SRM_*`, so it works w
 
 ## DSM API quirks (the consolidated cheatsheet)
 
-Error codes, response shapes, and known API names live in [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md). Read it before adding a command or debugging an unexpected `code:` error. Highlights:
+Error codes, cross-API rules, dead ends, and endpoints no command wraps yet live in [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md); what a field means for code that reads it is a comment at that line. Read it before adding a command or debugging an unexpected `code:` error. Highlights:
 
 - Error 114 = "Lost parameters" (NOT "API key mismatch"). 5100 = "Unable to perform" (NOT empty list).
 - `requestFormat: "JSON"` in `SYNO.API.Info` describes the **response**, not the request. Always send form-encoded.

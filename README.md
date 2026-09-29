@@ -106,7 +106,7 @@ syno raw SYNO.Core.System info --target=srm --params-json='{}'
 
 `raw` requires `--yes` for POST and for any method that isn't on its read-method allowlist. Endpoint-specific exceptions cover calls verified as read-only. Synology has mutating endpoints that use GET, so the HTTP verb alone is not a safe write boundary. SRM's target policy refuses every mutation even with `--yes`.
 
-See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, response shapes, and known API names.
+See [`docs/dsm-api-quirks.md`](docs/dsm-api-quirks.md) for error codes, cross-API rules, dead ends, and endpoints no command wraps yet.
 
 ## License
 
