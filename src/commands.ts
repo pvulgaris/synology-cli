@@ -59,6 +59,7 @@ import {
   nasContainerRemove,
   nasContainersList,
 } from "./tools/containers.js";
+import { listGuests, nasVmGuestControl } from "./tools/vmm.js";
 import { withAudit } from "./audit.js";
 import { nasStateApply, nasStateCheck, parseExpectedState } from "./tools/state.js";
 import { readFileSync } from "node:fs";
@@ -367,6 +368,29 @@ export const COMMANDS: RegisteredCommand[] = [
     summary: "Container Manager image inventory with repository, tags, id, size, and update flag.",
     platforms: DSM,
     run: ({ client }) => nasContainerImagesList(client),
+  },
+
+  // ── Virtual Machine Manager ───────────────────────────────────────────────
+  {
+    name: "vms list",
+    summary: "Virtual Machine Manager guests with their status.",
+    platforms: DSM,
+    run: async ({ client }) => ({ guests: await listGuests(client) }),
+  },
+  {
+    name: "vms control",
+    summary:
+      "Power a VM guest on, or shut it down cleanly through ACPI, and wait until VMM reports the new state. Idempotent.",
+    platforms: DSM,
+    args: ["name", "poweron|shutdown"],
+    mutating: true,
+    run: (ctx) => {
+      const action = arg(ctx, 1);
+      if (action !== "poweron" && action !== "shutdown") {
+        throw new UsageError(`invalid action "${action}"; expected poweron or shutdown`);
+      }
+      return nasVmGuestControl(ctx.runtime, ctx.client, { name: arg(ctx, 0), action });
+    },
   },
 
   // ── Packages ──────────────────────────────────────────────────────────────
