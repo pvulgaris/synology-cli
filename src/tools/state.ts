@@ -22,6 +22,9 @@
  *   whole rule set; each rule is { client, privilege, root_squash, async,
  *   insecure, crossmnt, security_flavor: { kerberos, kerberos_integrity,
  *   kerberos_privacy, sys } }.
+ * SYNO.Core.Region.NTP get/set v1, set sent with `syno raw` and read back on
+ *   2026-09-30: { timezone, enable_ntp, server }. Zones are DSM's own names
+ *   ("Eastern", "Pacific"), not IANA; enable_ntp reads "ntp" when NTP is on.
  * SYNO.Core.FileServ.NFS get v1: { enable_nfs, ... }. `root_squash` names who is mapped to what: "root" means no
  *   mapping, "admin"/"guest" map root only, and "all_admin"/"all_guest" map
  *   every user. An unknown value answers 2301. DSM stores `client` exactly as
@@ -41,6 +44,7 @@ const TIERS = ["hourly", "daily", "weekly", "monthly", "yearly"] as const;
 type Counts = Record<(typeof TIERS)[number], number>;
 
 export interface ExpectedState {
+  time?: { timezone: string; ntp_server: string };
   share: {
     name: string;
     vol_path?: string;
@@ -101,6 +105,7 @@ export interface Finding {
 // the file is validated strictly: unknown keys and wrong types are errors.
 type Kind = "string" | "boolean" | "count" | "time" | "days" | "counts" | "nfs_rules";
 const FIELDS: Record<string, Record<string, Kind>> = {
+  time: { timezone: "string", ntp_server: "string" },
   share: {
     name: "string",
     vol_path: "string",
@@ -124,6 +129,7 @@ const FIELDS: Record<string, Record<string, Kind>> = {
   nfs: { rules: "nfs_rules" },
 };
 const REQUIRED: Record<string, string[]> = {
+  time: ["timezone", "ntp_server"],
   share: ["name"],
   account: ["name"],
   snapshots: ["enabled", "time", "week_days", "repeat", "repeat_hour", "repeat_min", "last_work_hour"],
@@ -197,6 +203,25 @@ async function evaluate(dsm: SynoClient, expected: ExpectedState): Promise<Findi
   const drift = (subject: string, message: string, set?: Finding["set"], previous?: unknown) => {
     findings.push({ subject, message, fix: set ? "api" : "dsm", set, ...(previous === undefined ? {} : { previous }) });
   };
+
+  const time = expected.time;
+  if (time) {
+    const current = await dsm.call({ api: "SYNO.Core.Region.NTP", method: "get", version: 1 });
+    const want: Record<string, unknown> = { timezone: time.timezone, enable_ntp: "ntp", server: time.ntp_server };
+    const off = Object.keys(want).filter((k) => current[k] !== want[k]);
+    if (off.length) {
+      // All three go together: a partial set is reported to be rejected.
+      drift("time", off.map((k) => `${k} is ${JSON.stringify(current[k])}, expected ${JSON.stringify(want[k])}`).join(", "), () =>
+        dsm.call({
+          api: "SYNO.Core.Region.NTP",
+          method: "set",
+          version: 1,
+          post: true,
+          params: Object.fromEntries(Object.entries(want).map(([k, v]) => [k, q(v)])),
+        })
+      );
+    }
+  }
 
   const share = expected.share;
   const shares = (await nasSharesList(dsm)).shares as Array<Record<string, unknown>>;
