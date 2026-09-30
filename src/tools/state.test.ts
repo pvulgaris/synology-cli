@@ -92,7 +92,7 @@ function fakeClient(
   return { call } as unknown as SynoClient;
 }
 
-const runtime = () => ({ auditLogDir: mkdtempSync(join(tmpdir(), "syno-audit-")), tlsSkipVerify: false });
+const runtime = () => ({ auditLogDir: mkdtempSync(join(tmpdir(), "syno-audit-")) });
 const posts = (calls: SynologyCallOptions[]) => calls.filter((c) => c.post);
 
 test("state check: a matching NAS is ok regardless of key and weekday order", async () => {

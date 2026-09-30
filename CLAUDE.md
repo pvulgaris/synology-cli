@@ -116,11 +116,15 @@ It returns every package installable on this DS (105+ items) with no `installed_
 
 `skills/synology/SKILL.md` loads a per-user policy file naming packages the user doesn't want offered for uninstall (HyperBackup, ContainerManager, Tailscale). The binary doesn't read that file; refusal happens in the calling skill before it ever runs `syno packages uninstall`. Binary-side hard refusals are only `DSM` and `kernel`. The policy file's location and format are the user's choice.
 
-### TLS verification is process-wide via `NODE_TLS_REJECT_UNAUTHORIZED=0`
+### Certificates are verified unless a target opts out
 
-A per-fetch `undici` Agent for scoped TLS skip was tried and reverted: it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" plus silently-empty responses on some endpoints). The skip is now set process-wide at startup when `runtime.tlsSkipVerify` is true. The blast radius is bounded to Synology targets. If you add a non-Synology outbound, route that call through a per-call verifying Agent (`rejectUnauthorized:true`) to override the global skip. The enforcing direction is safe on Node 22; only the skipping per-fetch agent broke.
+`DSM_TLS_SKIP_VERIFY=1` or `SRM_TLS_SKIP_VERIFY=1` turns verification off for that target, for a device still on its self-signed default certificate. The skip used to be one global switch that was on by default. It stayed on for a NAS serving a valid Let's Encrypt certificate, and Node's warning about it was the only sign.
 
-Worth knowing: the router login transmits the SRM admin password over the unverified self-signed link, so a LAN MITM between you and the router could harvest it. Pin the SRM cert if that's in your threat model.
+The skip is `NODE_TLS_REJECT_UNAUTHORIZED=0`, set process-wide after the target loads. That scopes it to one target because every command talks to exactly one. A per-fetch `undici` Agent for a scoped skip was tried and reverted: it interacted badly with Node 22's built-in fetch (intermittent "fetch failed" plus silently-empty responses on some endpoints). If you add a non-Synology outbound, route it through a per-call verifying Agent (`rejectUnauthorized:true`) so a target's skip cannot reach it. The enforcing direction is safe on Node 22; only the skipping per-fetch agent broke.
+
+Leave Node's warning about the skip visible. It is how an unneeded skip gets noticed.
+
+With the skip on, the login sends the admin password over an unverified link, so a network MITM between you and the device could harvest it. Install a real certificate rather than living with the skip.
 
 ### No `synology-api` npm dep on purpose
 

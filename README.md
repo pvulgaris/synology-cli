@@ -23,6 +23,7 @@ Configure DSM, SRM, or both. A command loads only the target it uses.
 | `DSM_USER` | DSM account name (required) |
 | `DSM_PASSWORD` | account password |
 | `DSM_TOTP_SECRET` | TOTP seed for the account's 2FA |
+| `DSM_TLS_SKIP_VERIFY` | `1` skips certificate verification, for DSM's self-signed default certificate. Verification is on otherwise. |
 
 The account must be in the `administrators` group. DSM 7 gates its admin APIs on that membership and offers no selective grant.
 
@@ -34,8 +35,8 @@ Configure SRM independently when needed. Process settings apply to both targets.
 |---|---|
 | `SRM_BASE_URL` | SRM target, e.g. `https://router.example.test:8001`. |
 | `SRM_USER`, `SRM_PASSWORD`, `SRM_TOTP_SECRET` | router login (also `*_FILE`). Must be an SRM admin; usage is read-only. |
+| `SRM_TLS_SKIP_VERIFY` | `1` skips certificate verification for the router, as `DSM_TLS_SKIP_VERIFY` does for DSM. |
 | `AUDIT_LOG_DIR` | where write operations are logged. Default `~/.local/state/syno/audit/`. |
-| `TLS_REJECT_UNAUTHORIZED` | anything but `0` enforces cert validation. Defaults to skipping for self-signed Synology certificates. |
 
 `SRM_*` is independent of `DSM_*`. For example, `syno router update-check` and `syno raw --target=srm ...` work with no DSM configuration. SRM remains read-only.
 

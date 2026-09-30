@@ -96,14 +96,6 @@ async function main(): Promise<Outcome> {
   }
 
   const runtime = loadRuntimeConfig();
-  // Process-wide TLS skip for Synology's self-signed certificates. A per-fetch undici
-  // dispatcher was tried and reverted: it interacted badly with Node's built-in
-  // fetch (intermittent "fetch failed" and silently-empty responses). The blast
-  // radius is bounded to Synology targets. Any non-Synology outbound added
-  // later must route through its own verifying Agent to override this.
-  if (runtime.tlsSkipVerify) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
   const verbose = flags.verbose === true || flags.verbose === "true";
   const platform = selectPlatform(command, flags);
   let target;
@@ -115,6 +107,12 @@ async function main(): Promise<Outcome> {
     }
     throw err;
   }
+  // A target that opts out of certificate checks turns them off process-wide.
+  // That covers only this target: every command talks to exactly one. A
+  // per-fetch undici dispatcher was tried and reverted: it interacted badly
+  // with Node's built-in fetch (intermittent "fetch failed" and silently-empty
+  // responses).
+  if (target.tlsSkipVerify) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   const client = new SynoClient(target, { verbose });
   const result = await command.run({ runtime, target, client, args, flags });
   return { code: command.exitCode?.(result) ?? 0, stdout: JSON.stringify(result, null, 2) };

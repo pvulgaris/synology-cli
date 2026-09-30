@@ -35,7 +35,7 @@ const cmd = (name: string): Command => {
 function ctx(over: Partial<CommandContext> & { auditDir?: string }): CommandContext {
   const auditLogDir = over.auditDir ?? mkdtempSync(join(tmpdir(), "syno-audit-"));
   return {
-    runtime: { auditLogDir, tlsSkipVerify: false },
+    runtime: { auditLogDir },
     target:
       over.target ??
       ({ platform: "dsm", baseUrl: "https://nas.test", user: "agent" } as any),
