@@ -81,10 +81,13 @@ its complete NFS export rule set (`"rules": []` declares it not exported). The s
 described in `docs/dsm-api-quirks.md`. Apply sets
 the permission, schedule, retention, immutability and export rules; creating the
 share or the account, and turning the NFS service on, stay DSM steps. Unknown keys and wrong types are usage errors, so a
-typo cannot skip a check.
+typo cannot skip a check. The optional `time` block is NAS-wide: DSM's own zone
+name (`"Eastern"`, not IANA) and the NTP server that must be in use. Snapshot
+schedules run on NAS-local time, so apply sets it too.
 
 ```json
 {
+  "time": {"timezone": "Eastern", "ntp_server": "time.google.com"},
   "share": {"name": "backups", "vol_path": "/volume1", "btrfs_cow": true, "recycle_bin": false, "encryption": 0},
   "account": {"name": "backups", "description": "Managed backup account: backups", "password_never_expire": true},
   "snapshots": {"enabled": true, "time": "04:30", "week_days": [0, 1, 2, 3, 4, 5, 6],

@@ -111,7 +111,7 @@ The Compose document is sensitive even when the current file has no secret: envi
 
 ## Declared state
 
-`syno state check <expected.json>` diffs a NAS against a declared share, account, permission, snapshot schedule, retention, immutable window and, when declared, the share's complete NFS export rule set (subject `nfs`); it exits 3 on drift with one finding per drifted field, so several can share a `subject` (`fix: "api"` converges under apply, `"dsm"` needs the DSM UI and carries only the current and expected values). The file is validated strictly: an unknown key or wrong type is a usage error (exit 2), not a skipped check. `syno state apply <expected.json> --yes` converges the `api` findings, reads the NAS again, and lists what it wrote (`writes`) and what still drifts (`findings`). When a user keeps an expected-state file, change those settings through it rather than by hand in DSM, or the next check reports the difference as drift.
+`syno state check <expected.json>` diffs a NAS against a declared expected-state file (what it covers: `syno help --json`); it exits 3 on drift with one finding per drifted field, so several can share a `subject` (`fix: "api"` converges under apply, `"dsm"` needs the DSM UI and carries only the current and expected values). The file is validated strictly: an unknown key or wrong type is a usage error (exit 2), not a skipped check. `syno state apply <expected.json> --yes` converges the `api` findings, reads the NAS again, and lists what it wrote (`writes`) and what still drifts (`findings`). When a user keeps an expected-state file, change those settings through it rather than by hand in DSM, or the next check reports the difference as drift.
 
 ## Protected packages (per-user policy)
 

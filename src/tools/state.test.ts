@@ -12,6 +12,7 @@ import type { SynoClient, SynologyCallOptions } from "../client.js";
 import { nasStateApply, nasStateCheck, parseExpectedState, type ExpectedState } from "./state.js";
 
 const EXPECTED: ExpectedState = {
+  time: { timezone: "Eastern", ntp_server: "time.google.com" },
   share: { name: "backups", vol_path: "/volume1", btrfs_cow: true, recycle_bin: false, encryption: 0 },
   account: { name: "backups", description: "Managed backup account: backups", password_never_expire: true },
   snapshots: {
@@ -68,6 +69,8 @@ function healthy(): Responses {
     "SYNO.Core.Share.Snapshot.set_schedule": {},
     "SYNO.DisasterRecovery.Retention.set": {},
     "SYNO.DisasterRecovery.Retention.set_worm_lock": {},
+    "SYNO.Core.Region.NTP.get": { enable_ntp: "ntp", server: "time.google.com", timezone: "Eastern" },
+    "SYNO.Core.Region.NTP.set": {},
   };
 }
 
@@ -299,6 +302,20 @@ test("state apply: the verdict comes from a re-read, and a failed setter does no
   assert.equal(record.args.writes.length, 3);
 });
 
+test("state apply: time drift is one write of all three fields, as sent live", async () => {
+  const r = healthy();
+  Object.assign(r["SYNO.Core.Region.NTP.get"], { timezone: "Pacific", enable_ntp: "manual", server: "pool.ntp.org" });
+  const calls: SynologyCallOptions[] = [];
+  const result = await nasStateApply(runtime(), fakeClient(r, calls), EXPECTED);
+  assert.deepEqual(result.writes.map((f) => [f.subject, f.fix, f.message]), [
+    ["time", "api", 'timezone is "Pacific", expected "Eastern", enable_ntp is "manual", expected "ntp", server is "pool.ntp.org", expected "time.google.com"'],
+  ]);
+  // The params `syno raw` sent on 2026-09-30, which DSM applied and read back.
+  assert.deepEqual(posts(calls).map((c) => [`${c.api}.${c.method}`, c.params]), [
+    ["SYNO.Core.Region.NTP.set", { timezone: '"Eastern"', enable_ntp: '"ntp"', server: '"time.google.com"' }],
+  ]);
+});
+
 test("parseExpectedState rejects what would silently skip a check", () => {
   const valid = JSON.parse(JSON.stringify(EXPECTED));
   const reject = (edit: (s: any) => void, message: RegExp) => {
@@ -313,6 +330,7 @@ test("parseExpectedState rejects what would silently skip a check", () => {
   reject((s) => (s.snapshots.immutable_days = "7"), /snapshots\.immutable_days must be a non-negative integer/);
   reject((s) => (s.snapshots.time = "4:30"), /snapshots\.time must be "HH:MM"/);
   reject((s) => delete s.snapshots.repeat_hour, /snapshots\.repeat_hour is required/);
+  reject((s) => delete s.time.ntp_server, /time\.ntp_server is required/);
   reject((s) => delete s.snapshots.smart_recycle.yearly, /snapshots\.smart_recycle must be/);
   reject((s) => (s.nfs.rules[0].root_squash = "root_squash"), /nfs\.rules must be/);
   reject((s) => delete s.nfs.rules[0].insecure, /nfs\.rules must be/);
