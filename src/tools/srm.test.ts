@@ -2,7 +2,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SynoClient, SynologyCallOptions } from "../client.js";
-import { routerSrmClients, routerSrmOsCheckUpdate } from "./srm.js";
+import {
+  parseRouterExpectedState,
+  routerSrmClients,
+  routerSrmOsCheckUpdate,
+  routerSrmStateCheck,
+} from "./srm.js";
 
 function fakeClient(handlers: Record<string, (params: Record<string, unknown>) => unknown>): SynoClient {
   const call = async (opts: SynologyCallOptions): Promise<unknown> => {
@@ -92,4 +97,56 @@ test("router clients: rejects malformed MACs before reading the inventory", asyn
 
   await assert.rejects(() => routerSrmClients(router, "not-a-mac"), /Invalid MAC address/);
   assert.equal(called, false);
+});
+
+/** Shape of SYNO.Core.Network.DHCPServer.Reservation get v1 on SRM 1.3.1. */
+function reservations(list: unknown): { router: SynoClient; calls: SynologyCallOptions[] } {
+  const calls: SynologyCallOptions[] = [];
+  const router = {
+    call: async (opts: SynologyCallOptions) => {
+      calls.push(opts);
+      return { reservationList: list };
+    },
+  } as unknown as SynoClient;
+  return { router, calls };
+}
+
+const RESERVED = [
+  { hostname: "printer", ip: "192.0.2.20", mac: "02:00:00:00:00:20" },
+  { hostname: "mini", ip: "192.0.2.10", mac: "02:00:00:00:00:10" },
+];
+
+test("router state: a declared reservation that matches is clean; undeclared ones are ignored", async () => {
+  const { router, calls } = reservations(RESERVED);
+  const expected = parseRouterExpectedState(
+    JSON.stringify({ dhcp_reservations: [{ mac: "02-00-00-00-00-10", ip: "192.0.2.10" }] })
+  );
+
+  assert.deepEqual(await routerSrmStateCheck(router, expected), { ok: true, findings: [] });
+  assert.equal(calls[0].sensitiveResponse, true);
+});
+
+test("router state: a missing reservation and a different address are drift", async () => {
+  const { router } = reservations(RESERVED);
+  const result = await routerSrmStateCheck(router, {
+    dhcp_reservations: [
+      { mac: "02:00:00:00:00:10", ip: "192.0.2.11" },
+      { mac: "02:00:00:00:00:30", ip: "192.0.2.30" },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.findings, ["02:00:00:00:00:10 reserved to 192.0.2.10, expected 192.0.2.11", "02:00:00:00:00:30 has no reservation, expected 192.0.2.30"]);
+});
+
+test("parseRouterExpectedState rejects keys it would not check", () => {
+  const entry = { mac: "02:00:00:00:00:10", ip: "192.0.2.10" };
+  assert.throws(
+    () => parseRouterExpectedState(JSON.stringify({ dhcp_reservations: [entry], port_forwards: [] })),
+    /unknown key port_forwards/
+  );
+  assert.throws(
+    () => parseRouterExpectedState(JSON.stringify({ dhcp_reservations: [{ ...entry, hostname: "mini" }] })),
+    /exactly \{ mac, ip \}/
+  );
 });

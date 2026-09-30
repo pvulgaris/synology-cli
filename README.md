@@ -2,7 +2,7 @@
 
 `syno` is an agent-oriented command-line tool for Synology DSM and SRM devices. It provides curated commands for common operations and a target-aware `raw` escape hatch for the rest.
 
-Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the Synology API trace. Exit 0 on success, 1 on failure, 2 on a usage error, 3 when `syno state` finds drift.
+Every command prints JSON on stdout, so you can pipe it straight to `jq`. Concise progress and errors go to stderr; `--verbose` adds the Synology API trace. Exit 0 on success, 1 on failure, 2 on a usage error, 3 when `syno state` or `syno router state` finds drift.
 
 ## Install
 
