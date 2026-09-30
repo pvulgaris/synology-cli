@@ -56,15 +56,16 @@ test("SRM target loads without any DSM configuration", () => {
   );
 });
 
-test("blank SRM user uses the dedicated account default", () => {
-  withEnv(
-    { SRM_BASE_URL: "https://router.test:8001", SRM_USER: "   " },
-    () => assert.equal(loadTarget("srm").user, "claude-mcp")
-  );
+test("a missing or blank user is refused rather than defaulted", () => {
+  for (const value of [undefined, "   "]) {
+    withEnv({ SRM_BASE_URL: "https://router.test:8001", SRM_USER: value }, () =>
+      assert.throws(() => loadTarget("srm"), /Missing required env: SRM_USER/)
+    );
+  }
 });
 
 test("tryLoadTarget returns null only when that target is absent", () => {
-  withEnv({ DSM_BASE_URL: "https://nas.test", SRM_BASE_URL: undefined }, () => {
+  withEnv({ DSM_BASE_URL: "https://nas.test", DSM_USER: "agent", SRM_BASE_URL: undefined }, () => {
     assert.equal(tryLoadTarget("srm"), null);
     assert.equal(tryLoadTarget("dsm")?.platform, "dsm");
   });
@@ -73,10 +74,10 @@ test("tryLoadTarget returns null only when that target is absent", () => {
 test("a trailing slash addresses the same target, so it shares the session", () => {
   let withSlash = "";
   let without = "";
-  withEnv({ DSM_BASE_URL: "https://nas.test:5001/", DSM_SID_CACHE_FILE: undefined }, () => {
+  withEnv({ DSM_BASE_URL: "https://nas.test:5001/", DSM_USER: "agent", DSM_SID_CACHE_FILE: undefined }, () => {
     withSlash = loadTarget("dsm").sidCacheFile;
   });
-  withEnv({ DSM_BASE_URL: "https://nas.test:5001", DSM_SID_CACHE_FILE: undefined }, () => {
+  withEnv({ DSM_BASE_URL: "https://nas.test:5001", DSM_USER: "agent", DSM_SID_CACHE_FILE: undefined }, () => {
     without = loadTarget("dsm").sidCacheFile;
   });
   assert.equal(withSlash, without);

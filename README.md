@@ -20,7 +20,7 @@ Configure DSM, SRM, or both. A command loads only the target it uses.
 | Env | Meaning |
 |---|---|
 | `DSM_BASE_URL` | DSM target, e.g. `https://nas.example.test:5001` |
-| `DSM_USER` | DSM account name (default `claude-mcp`) |
+| `DSM_USER` | DSM account name (required) |
 | `DSM_PASSWORD` | account password |
 | `DSM_TOTP_SECRET` | TOTP seed for the account's 2FA |
 

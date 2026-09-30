@@ -72,7 +72,12 @@ export function loadTarget(platform: Platform): TargetConfig {
   // Both spellings address one device, so both must resolve to one session file.
   // A second login inside the window that minted the first SID is rejected.
   const baseUrl = configured.replace(/\/$/, "");
-  const user = envValue(`${defaults.envPrefix}_USER`) ?? "claude-mcp";
+  // No fallback account name. A default that names no real account turns every
+  // run without the variable into a failed login, which DSM and Active Insight
+  // record against the NAS.
+  const userName = `${defaults.envPrefix}_USER`;
+  const user = envValue(userName);
+  if (!user) throw new Error(`Missing required env: ${userName}`);
   return {
     platform,
     baseUrl,

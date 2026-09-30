@@ -28,7 +28,7 @@ function run(args: string[]): { code: number; stdout: string; stderr: string } {
     encoding: "utf8",
     // A dummy base URL so target loading succeeds; every case here throws (or returns)
     // during argument handling, before any DSM call, so it's never dialed.
-    env: { ...process.env, DSM_BASE_URL: "https://localhost:1", DSM_PASSWORD: "x", DSM_TOTP_SECRET: "x" },
+    env: { ...process.env, DSM_BASE_URL: "https://localhost:1", DSM_USER: "agent", DSM_PASSWORD: "x", DSM_TOTP_SECRET: "x" },
   });
   return { code: r.status ?? -1, stdout: r.stdout, stderr: r.stderr };
 }
@@ -126,6 +126,7 @@ test("verify: an unscoped run selects only the configured target's commands", ()
   // Unreachable on purpose: selection is what's under test, so each command is
   // expected to print its header and then fail to connect.
   env.SRM_BASE_URL = "https://127.0.0.1:9";
+  env.SRM_USER = "agent";
   env.SRM_PASSWORD = "x";
   env.SRM_TOTP_SECRET = "JBSWY3DPEHPK3PXP";
   const result = spawnSync(
