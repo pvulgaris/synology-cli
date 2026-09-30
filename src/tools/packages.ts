@@ -45,6 +45,7 @@ import type { SynoClient } from "../client.js";
 import { isSoftTransportError } from "../client.js";
 import { withAudit } from "../audit.js";
 import { poll } from "./poll.js";
+import { listGuests } from "./vmm.js";
 
 // DSM response shapes used by the install/uninstall/update flows. None are
 // documented — observed from HAR captures and reverse-engineered. Fields are
@@ -831,6 +832,24 @@ export async function nasPackageUpdate(
         ? `Package "${args.name}" is already at the latest version (${before.version}); no update available.`
         : `Package "${args.name}" is at ${before.version}, newer than the catalog's ${catalog.version}; not downgrading.`
     );
+  }
+
+  // Virtual Machine Manager refuses to upgrade while any guest runs ("There are
+  // still virtual machines running in the cluster"), but only after the .spk
+  // has downloaded. Check first, write nothing, and name the guests to stop.
+  // A stopped VMM runs no guests, and its guest API does not answer.
+  if (catalog.id === "Virtualization" && before.status === "running") {
+    const guests = (await listGuests(dsm)).filter((g) => g.status !== "shutdown");
+    if (guests.length > 0) {
+      return {
+        status: "needs_vm_shutdown",
+        guests,
+        message:
+          `Shut each guest down with "syno vms control <name> shutdown --yes", re-run ` +
+          `this update, then power them back on with "syno vms control <name> poweron --yes". ` +
+          `A guest whose status is not running or transitional needs the VMM UI.`,
+      };
+    }
   }
 
   const { after, ok } = await withAudit(

@@ -92,6 +92,8 @@ If a package write returns `verified: false`, surface the entire `{ before, afte
 
 Installing a package with dependencies returns a plan instead of installing. Re-run with `--accept-dependencies` once the user has seen the list.
 
+Updating Virtual Machine Manager while a guest runs returns `needs_vm_shutdown` naming the guests, and writes nothing. Confirm with the user, shut each down with `syno vms control`, update, then power them back on.
+
 Uninstall only ever preserves data. `--keep-data` is required to proceed; actual data deletion is package-specific and belongs in the DSM UI.
 
 First-time-only gotcha: if Package Center calls return odd errors on a freshly-created DSM account, the user may need to log into the DSM UI as that account once and accept the Package Center TOS. Offer it as a hypothesis on a brand-new install only.

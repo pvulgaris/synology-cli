@@ -360,6 +360,56 @@ test("update: refuses a downgrade before any write, and names the reason", async
   assert.equal(calls.filter((c) => c.post).length, 0);
 });
 
+function makeVmmFake(guestStatuses: string[], calls: SynologyCallOptions[], vmmStatus = "running") {
+  const call = async (opts: SynologyCallOptions): Promise<unknown> => {
+    calls.push(opts);
+    if (opts.api === "SYNO.Core.Package.Server" && opts.method === "list") {
+      return { packages: [{ id: "Virtualization", dname: "Virtual Machine Manager", version: "2.8.0-13004", link: "http://x/p.spk", md5: "m", size: 1 }] };
+    }
+    if (opts.api === "SYNO.Core.Package" && opts.method === "list") {
+      return { packages: [{ id: "Virtualization", name: "Virtual Machine Manager", version: "2.7.0-12229", additional: { status: vmmStatus } }] };
+    }
+    if (opts.api === "SYNO.Virtualization.API.Guest" && opts.method === "list") {
+      return {
+        guests: guestStatuses.map((status, i) => ({ guest_name: `vm${i}`, status })),
+      };
+    }
+    throw new Error(`unexpected DSM call: ${opts.api}.${opts.method}`);
+  };
+  return { call } as unknown as SynoClient;
+}
+
+// VMM's own upgrade step refuses while a guest runs, after the download.
+test("update: Virtual Machine Manager with a guest not shut down names it and writes nothing", async () => {
+  const calls: SynologyCallOptions[] = [];
+  const res = (await nasPackageUpdate(cfg, makeVmmFake(["shutdown", "running", "booting"], calls), {
+    name: "Virtualization",
+  })) as any;
+  assert.equal(res.status, "needs_vm_shutdown");
+  assert.deepEqual(res.guests, [
+    { name: "vm1", status: "running" },
+    { name: "vm2", status: "booting" },
+  ]);
+  assert.equal(calls.filter((c) => c.post).length, 0);
+});
+
+test("update: Virtual Machine Manager with every guest shut down proceeds to the first write", async () => {
+  const calls: SynologyCallOptions[] = [];
+  await assert.rejects(
+    nasPackageUpdate(cfg, makeVmmFake(["shutdown"], calls), { name: "Virtualization" }),
+    /unexpected DSM call: SYNO\.Core\.Package\.feasibility_check/
+  );
+});
+
+test("update: a stopped Virtual Machine Manager skips the guest check", async () => {
+  const calls: SynologyCallOptions[] = [];
+  await assert.rejects(
+    nasPackageUpdate(cfg, makeVmmFake(["running"], calls, "stop"), { name: "Virtualization" }),
+    /unexpected DSM call: SYNO\.Core\.Package\.feasibility_check/
+  );
+  assert.equal(calls.some((c) => c.api === "SYNO.Virtualization.API.Guest"), false);
+});
+
 // The normalizer is the one place the dname→id fallback lives, so a catalog row
 // without `dname` must surface `name: <id>` (never undefined) on every read path.
 function makeNamelessCatalogFake() {
