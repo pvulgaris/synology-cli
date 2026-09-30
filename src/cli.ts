@@ -103,13 +103,6 @@ async function main(): Promise<Outcome> {
   // later must route through its own verifying Agent to override this.
   if (runtime.tlsSkipVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-    // Node warns about that variable on the first TLS handshake of every run.
-    // It is this CLI's configured behavior, so drop that one warning.
-    const emitWarning = process.emitWarning;
-    process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
-      if (String(warning).includes("NODE_TLS_REJECT_UNAUTHORIZED")) return;
-      (emitWarning as (...args: unknown[]) => void).call(process, warning, ...rest);
-    }) as typeof process.emitWarning;
   }
   const verbose = flags.verbose === true || flags.verbose === "true";
   const platform = selectPlatform(command, flags);
