@@ -80,3 +80,48 @@ export async function routerSrmClients(router: SynoClient, macInput: string) {
     source_truncated: data.exceed_dev_list_max ?? false,
   };
 }
+
+interface RouterExpectedState {
+  dhcp_reservations: Array<{ mac: string; ip: string }>;
+}
+
+/** Rejects keys it does not check, so a declaration cannot pass unchecked.
+ *  Other bad input needs no guard: it throws here or never matches. */
+export function parseRouterExpectedState(text: string): RouterExpectedState {
+  const parsed = JSON.parse(text);
+  for (const key of Object.keys(parsed)) {
+    if (key !== "dhcp_reservations") throw new Error(`unknown key ${key}`);
+  }
+  return {
+    dhcp_reservations: parsed.dhcp_reservations.map((r: Record<string, string>, i: number) => {
+      if (Object.keys(r).sort().join() !== "ip,mac") {
+        throw new Error(`dhcp_reservations[${i}] must be exactly { mac, ip }`);
+      }
+      return { mac: canonicalMac(r.mac), ip: r.ip };
+    }),
+  };
+}
+
+/** Compare declared IPv4 DHCP reservations with the router's; reservations the
+ *  file does not name are ignored.
+ *
+ *  SYNO.Core.Network.DHCPServer.Reservation get v1, read live on SRM 1.3.1
+ *  (RT6600ax) on 2026-09-30 with no params: { reservationList: [{ mac, ip,
+ *  hostname }] }, MACs lowercase and colon-separated. v2 splits the list into
+ *  { ipv4, ipv6 } and names the MAC `clid`. */
+export async function routerSrmStateCheck(router: SynoClient, expected: RouterExpectedState) {
+  const data = await router.call<{ reservationList: Array<{ mac: string; ip: string }> }>({
+    api: "SYNO.Core.Network.DHCPServer.Reservation",
+    method: "get",
+    version: 1,
+    // The list names every reserved device on the network.
+    sensitiveResponse: true,
+  });
+  const live = new Map(data.reservationList.map((r) => [r.mac, r.ip]));
+  const findings = expected.dhcp_reservations
+    .filter(({ mac, ip }) => live.get(mac) !== ip)
+    .map(({ mac, ip }) =>
+      live.has(mac) ? `${mac} reserved to ${live.get(mac)}, expected ${ip}` : `${mac} has no reservation, expected ${ip}`
+    );
+  return { ok: findings.length === 0, findings };
+}

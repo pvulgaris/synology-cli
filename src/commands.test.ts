@@ -227,7 +227,7 @@ test("gate: every command that can mutate DSM is either mutating or raw", () => 
 });
 
 test("exit: state drift is 3, distinct from a failure's 1", () => {
-  for (const name of ["state check", "state apply"]) {
+  for (const name of ["state check", "state apply", "router state check"]) {
     assert.equal(byName(name).exitCode?.({ ok: false }), 3);
     assert.equal(byName(name).exitCode?.({ ok: true }), 0);
   }

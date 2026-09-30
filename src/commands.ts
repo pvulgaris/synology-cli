@@ -40,7 +40,12 @@ import { nasExternalAccess } from "./tools/external.js";
 import { nasNotifications } from "./tools/notifications.js";
 import { nasCertificates } from "./tools/certificates.js";
 import { nasDsmOsCheckUpdate } from "./tools/updates.js";
-import { routerSrmClients, routerSrmOsCheckUpdate } from "./tools/srm.js";
+import {
+  parseRouterExpectedState,
+  routerSrmClients,
+  routerSrmOsCheckUpdate,
+  routerSrmStateCheck,
+} from "./tools/srm.js";
 import {
   nasHyperbackupTasks,
   nasShareSnapshots,
@@ -166,9 +171,9 @@ export function commandUsage(command: RegisteredCommand): string {
 /** Drift gets its own code: 1 already means a runtime or API failure. */
 const driftExit = (result: unknown) => ((result as { ok: boolean }).ok ? 0 : 3);
 
-function expectedState(path: string) {
+function expectedState<T>(path: string, parse: (text: string) => T): T {
   try {
-    return parseExpectedState(readFileSync(path, "utf8"));
+    return parse(readFileSync(path, "utf8"));
   } catch (err) {
     throw new UsageError(`cannot read expected state ${path}: ${(err as Error).message}`);
   }
@@ -245,7 +250,7 @@ export const COMMANDS: RegisteredCommand[] = [
       "Compare the NAS with an expected-state JSON file (NAS time zone and NTP server; share, account, permission, snapshot schedule/retention/immutability, NFS export rules). Exits 3 on drift.",
     platforms: DSM,
     args: ["file"],
-    run: (ctx) => nasStateCheck(ctx.client, expectedState(arg(ctx, 0))),
+    run: (ctx) => nasStateCheck(ctx.client, expectedState(arg(ctx, 0), parseExpectedState)),
     exitCode: driftExit,
   },
   {
@@ -255,7 +260,7 @@ export const COMMANDS: RegisteredCommand[] = [
     platforms: DSM,
     args: ["file"],
     mutating: true,
-    run: (ctx) => nasStateApply(ctx.runtime, ctx.client, expectedState(arg(ctx, 0))),
+    run: (ctx) => nasStateApply(ctx.runtime, ctx.client, expectedState(arg(ctx, 0), parseExpectedState)),
     exitCode: driftExit,
   },
 
@@ -532,6 +537,15 @@ export const COMMANDS: RegisteredCommand[] = [
     platforms: SRM,
     args: ["mac"],
     run: (ctx) => routerSrmClients(ctx.client, arg(ctx, 0)),
+  },
+  {
+    name: "router state check",
+    summary:
+      'Compare the router\'s IPv4 DHCP reservations with an expected-state JSON file ({"dhcp_reservations": [{"mac", "ip"}]}); reservations the file does not name are ignored. Exits 3 on drift.',
+    platforms: SRM,
+    args: ["file"],
+    run: (ctx) => routerSrmStateCheck(ctx.client, expectedState(arg(ctx, 0), parseRouterExpectedState)),
+    exitCode: driftExit,
   },
 
   // ── Escape hatch ──────────────────────────────────────────────────────────
