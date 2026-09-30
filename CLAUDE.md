@@ -106,7 +106,7 @@ It returns every package installable on this DS (105+ items) with no `installed_
 
 ### DSM Web API is reverse-engineered, not specced
 
-`SYNO.*` is not a public, versioned spec. Synology publishes a partial guide (mainly Auth and FileStation); the rest is reverse-engineered from DSM's own JS clients. When adding a command, inspect DSM's UI network tab for the exact api/method/version/params the official client sends, then mirror it. Don't trust third-party docs alone. Widely-cited community references lag current DSM behavior, and following one shipped an upgrade bug here before the real flow was pulled from a HAR.
+`SYNO.*` is not a public, versioned spec. Synology publishes a partial guide (mainly Auth and FileStation); the rest is reverse-engineered from DSM's own JS clients.
 
 ### Hard refusals live in `tools/packages.ts`, not the command registry
 
