@@ -85,7 +85,7 @@ For each write:
    ```
    Anything other than `yes` aborts. Don't infer consent from "sure", "ok", "go ahead".
 3. Run the command with exactly the args you just confirmed, plus `--yes`.
-4. Check the command exit status. Container writes return only after verification. For package writes, also check `verified === true` (or `removed === true`) in the output.
+4. Check the command exit status. Container and VM writes return only after verification. For package writes, also check `verified === true` (or `removed === true`) in the output.
 5. Repeat from step 1 for the next package. Never bundle multiple writes in one turn.
 
 If a package write returns `verified: false`, surface the entire `{ before, after, error }` payload. Don't retry automatically. The likeliest cause is a Package Center precondition (TOS acceptance on a fresh account, a package conflict) that needs human judgment.
