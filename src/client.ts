@@ -8,9 +8,8 @@
  * Reference: Synology DSM Login Web API Guide; SYNO.API.* family endpoints.
  * We hit `entry.cgi` for almost everything (the unified DSM dispatcher).
  *
- * TLS: DSM ships with a self-signed cert by default. If `cfg.tlsSkipVerify`
- * is true, the cli sets NODE_TLS_REJECT_UNAUTHORIZED=0 process-wide at startup.
- * We do not paper over that here.
+ * TLS: certificates are verified unless the target sets `tlsSkipVerify`, in
+ * which case the cli sets NODE_TLS_REJECT_UNAUTHORIZED=0 for the process.
  */
 
 import type { TargetConfig } from "./config.js";

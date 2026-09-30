@@ -89,12 +89,25 @@ test("runtime configuration does not require a device", () => {
       DSM_BASE_URL: undefined,
       SRM_BASE_URL: undefined,
       AUDIT_LOG_DIR: "/tmp/syno-audit-test",
-      TLS_REJECT_UNAUTHORIZED: "1",
     },
     () => {
       const runtime = loadRuntimeConfig();
       assert.equal(runtime.auditLogDir, "/tmp/syno-audit-test");
-      assert.equal(runtime.tlsSkipVerify, false);
     }
   );
+});
+
+// Certificates are verified unless one target opts out. The former global
+// switch, TLS_REJECT_UNAUTHORIZED=0, skipped verification for every target
+// by default and no longer does anything.
+test("certificate checks are on unless a target sets <PREFIX>_TLS_SKIP_VERIFY=1", () => {
+  const targets = { DSM_BASE_URL: "https://nas.test:5001", DSM_USER: "a", SRM_BASE_URL: "https://router.test:8001", SRM_USER: "a" };
+  withEnv({ ...targets, TLS_REJECT_UNAUTHORIZED: "0", DSM_TLS_SKIP_VERIFY: undefined, SRM_TLS_SKIP_VERIFY: undefined }, () => {
+    assert.equal(loadTarget("dsm").tlsSkipVerify, false);
+    assert.equal(loadTarget("srm").tlsSkipVerify, false);
+  });
+  withEnv({ ...targets, DSM_TLS_SKIP_VERIFY: undefined, SRM_TLS_SKIP_VERIFY: "1" }, () => {
+    assert.equal(loadTarget("dsm").tlsSkipVerify, false);
+    assert.equal(loadTarget("srm").tlsSkipVerify, true);
+  });
 });

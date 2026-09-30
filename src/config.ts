@@ -7,7 +7,6 @@ export type Platform = "dsm" | "srm";
 
 export interface RuntimeConfig {
   auditLogDir: string;
-  tlsSkipVerify: boolean;
 }
 
 /** Everything the client needs to authenticate to one Synology device. */
@@ -21,6 +20,9 @@ export interface TargetConfig {
   authPath: string;
   sidCacheFile: string;
   readOnly: boolean;
+  /** `<PREFIX>_TLS_SKIP_VERIFY=1` opts one target out of certificate checks,
+   *  for a device still on DSM or SRM's self-signed default. */
+  tlsSkipVerify: boolean;
 }
 
 type PlatformDefaults = Pick<
@@ -54,7 +56,6 @@ function envValue(name: string): string | undefined {
 export function loadRuntimeConfig(): RuntimeConfig {
   return {
     auditLogDir: process.env.AUDIT_LOG_DIR ?? join(stateDir(), "audit"),
-    tlsSkipVerify: (process.env.TLS_REJECT_UNAUTHORIZED ?? "0") === "0",
   };
 }
 
@@ -90,6 +91,7 @@ export function loadTarget(platform: Platform): TargetConfig {
       envValue(`${defaults.envPrefix}_SID_CACHE_FILE`) ??
       defaultSessionPath(defaults.session, baseUrl, user),
     readOnly: defaults.readOnly,
+    tlsSkipVerify: envValue(`${defaults.envPrefix}_TLS_SKIP_VERIFY`) === "1",
   };
 }
 

@@ -11,7 +11,6 @@ import { SynoClient } from "../client.js";
 
 async function main(): Promise<void> {
   const runtime = loadRuntimeConfig();
-  if (runtime.tlsSkipVerify) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
   const { argv, flags } = parseArgv(process.argv.slice(2));
   const targetValue = flags.target;
@@ -43,6 +42,10 @@ async function main(): Promise<void> {
     try {
       const platform = selectPlatform(command, flags);
       const config = loadTarget(platform);
+      // Node reads this variable for each new connection, and DSM and SRM are
+      // different origins, so each target's setting holds for its own calls.
+      if (config.tlsSkipVerify) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+      else delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
       const output = await command.run({
         runtime,
         target: config,
