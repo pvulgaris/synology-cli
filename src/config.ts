@@ -20,6 +20,9 @@ export interface TargetConfig {
   authPath: string;
   sidCacheFile: string;
   readOnly: boolean;
+  /** Log in with DSM's web UI Noise handshake and sign each request. Without it
+   *  DSM grants a limited session that refuses administrator Core APIs. */
+  noiseLogin: boolean;
   /** `<PREFIX>_TLS_SKIP_VERIFY=1` opts one target out of certificate checks,
    *  for a device still on DSM or SRM's self-signed default. */
   tlsSkipVerify: boolean;
@@ -27,16 +30,18 @@ export interface TargetConfig {
 
 type PlatformDefaults = Pick<
   TargetConfig,
-  "envPrefix" | "session" | "authVersion" | "authPath" | "readOnly"
+  "envPrefix" | "session" | "authVersion" | "authPath" | "readOnly" | "noiseLogin"
 >;
 
 const PLATFORMS: Record<Platform, PlatformDefaults> = {
   dsm: {
     envPrefix: "DSM",
     session: "syno-cli",
-    authVersion: 6,
+    // v6 ignores the Noise handshake and returns a limited session.
+    authVersion: 7,
     authPath: "entry.cgi",
     readOnly: false,
+    noiseLogin: true,
   },
   srm: {
     envPrefix: "SRM",
@@ -44,6 +49,7 @@ const PLATFORMS: Record<Platform, PlatformDefaults> = {
     authVersion: 3,
     authPath: "auth.cgi",
     readOnly: true,
+    noiseLogin: false,
   },
 };
 
@@ -91,6 +97,7 @@ export function loadTarget(platform: Platform): TargetConfig {
       envValue(`${defaults.envPrefix}_SID_CACHE_FILE`) ??
       defaultSessionPath(defaults.session, baseUrl, user),
     readOnly: defaults.readOnly,
+    noiseLogin: defaults.noiseLogin,
     tlsSkipVerify: envValue(`${defaults.envPrefix}_TLS_SKIP_VERIFY`) === "1",
   };
 }

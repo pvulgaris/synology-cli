@@ -560,8 +560,10 @@ export const COMMANDS: RegisteredCommand[] = [
       version: { type: "integer", value: "N" },
       post: "boolean",
       "params-json": { type: "string", value: "JSON" },
+      // DSM demands a re-entered password before saving a root-owned script task.
+      "confirm-password": "boolean",
     },
-    run: (ctx) => {
+    run: async (ctx) => {
       const api = arg(ctx, 0);
       const method = arg(ctx, 1);
       const params: Record<string, string> = {};
@@ -592,15 +594,25 @@ export const COMMANDS: RegisteredCommand[] = [
       }
       const version = intFlag(ctx, "version") ?? 1;
       const post = boolFlag(ctx, "post");
+      const confirmPassword = boolFlag(ctx, "confirm-password");
+      if (confirmPassword && !post) {
+        throw new UsageError("--confirm-password requires --post, which keeps the token out of the URL");
+      }
       const sensitiveResponse =
+        confirmPassword ||
         Object.keys(params).some(isSensitiveParamKey) ||
         (api === "SYNO.Docker.Project" && ["create", "get", "update"].includes(method));
-      const call = () =>
-        ctx.client.call({ api, method, version, post, params, sensitiveResponse });
+      const call = async () => {
+        // Minted inside the audited call, so a failed confirmation is recorded too.
+        if (confirmPassword) {
+          params.SynoConfirmPWToken = JSON.stringify(await ctx.client.passwordConfirmToken());
+        }
+        return ctx.client.call({ api, method, version, post, params, sensitiveResponse });
+      };
       // DSM has mutating endpoints that use GET and read-only endpoints that
       // use POST, so the API, method, and transport jointly decide whether this
-      // call needs the audit trail.
-      if (!rawCallMayMutate(api, method, post)) return call();
+      // call needs the audit trail. Re-entering the password always does.
+      if (!confirmPassword && !rawCallMayMutate(api, method, post)) return call();
       let result: unknown;
       return withAudit(
         ctx.runtime,
@@ -747,6 +759,7 @@ export function requiresConfirmation(
 ): boolean {
   if (command.mutating) return true;
   if (command.name !== "raw") return false;
+  if (flags["confirm-password"] === true || flags["confirm-password"] === "true") return true;
   const post = flags.post === true || flags.post === "true";
   return args[0] && args[1] ? rawCallMayMutate(args[0], args[1], post) : post;
 }

@@ -82,6 +82,10 @@ export interface SessionRecord {
    *  it would run commands (writes included) as the wrong account for up to the TTL. */
   baseUrl: string;
   user: string;
+  /** The Noise sending key and handshake hash (base64url) that sign each request
+   *  of a full-access DSM session, as much a bearer credential as the SID, and
+   *  the first request nonce no process has reserved yet. */
+  noise?: { key: string; handshakeHash: string; nextNonce: number };
 }
 
 /** True when a cached record authenticates the target we're about to call. A
@@ -140,6 +144,15 @@ export function readSession(path: string): SessionRecord | null {
         totpWindow: typeof j.totpWindow === "number" ? j.totpWindow : undefined,
         baseUrl: typeof j.baseUrl === "string" ? j.baseUrl : "",
         user: typeof j.user === "string" ? j.user : "",
+        ...(typeof j.noise?.key === "string" && typeof j.noise?.handshakeHash === "string"
+          ? {
+              noise: {
+                key: j.noise.key,
+                handshakeHash: j.noise.handshakeHash,
+                nextNonce: Number.isSafeInteger(j.noise.nextNonce) ? j.noise.nextNonce : 0,
+              },
+            }
+          : {}),
       };
     }
   } catch {

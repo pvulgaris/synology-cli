@@ -20,10 +20,11 @@ A CLI is a fresh process per invocation, which turns two latent problems into ev
 - An `O_EXCL` lock file next to it serializes logins across processes, so `syno status & syno shares list &` doesn't race two logins into a TOTP-reuse 404. A lock older than 90s is presumed abandoned and broken.
 - When a login genuinely is needed inside the window that produced the last SID, `awaitFreshTotpWindow` waits for the next code rather than burning the current one. That wait is why the stale-lock bound must stay above 30s: a holder waiting out a TOTP window is not stuck.
 - DSM and SRM get independent session files keyed by target and account. A rejected cached SID waits for a fresh TOTP window before re-login.
+- A DSM session also caches its Noise sending key and the next unreserved request nonce. Without the Noise login DSM grants a limited session that refuses administrator Core APIs, and nonces must stay unique and close together, so processes reserve them in blocks under the same lock. See "Full-access sessions" in `docs/dsm-api-quirks.md`.
 
 ## `raw`
 
-`syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [k=v ...]` reaches an endpoint without a named command. Prefer `--params-json`; it handles Synology's form-value quoting.
+`syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [--confirm-password] [k=v ...]` reaches an endpoint without a named command. Prefer `--params-json`; it handles Synology's form-value quoting.
 
 `--post` goes through the same `--yes` gate as the named writes. So does any method that `methodMayMutate` does not recognize as a read, because Synology has mutating endpoints that use GET. SRM refuses all mutations at the client policy layer.
 

@@ -12,9 +12,9 @@ DSM error codes are NOT what they sound like — verified against [N4S4/synology
 |---|---|---|
 | 101 | Invalid parameter or wrong version | Call shape mostly right; bump `version` or check params |
 | 103 | Method not found | API exists; method doesn't. Often a renamed method (`list` → `load`, etc.) |
-| 105 | Insufficient permissions | Even admin users hit this on some endpoints (e.g. `Notification.Rule.list`) |
+| 105 | Insufficient permissions | Even admin users hit this on some endpoints (e.g. `Notification.Rule.list`). A session without the Noise login gets it on administrator Core writes; see [Full-access sessions](#full-access-sessions) |
 | 114 | **"Lost parameters"** — missing a required param (NOT "API key mismatch") |
-| 117 / 119 | SID expired — `SynoClient.call()` auto-retries with fresh login |
+| 117 / 119 | SID expired — `SynoClient.call()` auto-retries with fresh login. 119 with reason `session hash invalid.` is a rejected `X-SYNO-HASH` |
 | 120 | Invalid `additional[]` key — DSM rejects unknown field names |
 | 5100 | "Unable to perform" — generic internal failure (NOT "no records to return") |
 | 5102 | Invalid enum value (e.g. `type=blocked` rejected; valid values are `allow`/`deny`) |
@@ -94,6 +94,19 @@ The biggest footgun: where `additional[]` keys appear in the response varies by 
 | `SYNO.Core.Package.list` | Nested under `additional`: `p.additional.status`, `p.additional.install_type` |
 
 Always probe with `DEBUG_DSM_RESPONSES=1` and look at the raw shape before mapping fields.
+
+## Full-access sessions
+
+DSM 7 gives a login without the web UI's Noise handshake a limited session. Reads, Docker, package and snapshot-schedule writes work, but `SYNO.Core.TaskScheduler` writes (root-owned or not) and `SYNO.Core.Terminal set` return 105 for an administrator, even with a `SynoConfirmPWToken`. Verified on DSM 7.4.1; [N4S4/synology-api#239](https://github.com/N4S4/synology-api/issues/239) hit the same wall and [#282](https://github.com/N4S4/synology-api/pull/282) fixed it this way. `src/noise.ts` and `SynoClient` implement the flow:
+
+1. `POST entry.cgi/SYNO.API.Auth.UIConfig` (`api=SYNO.API.Auth.UIConfig method=get version=1`). Its `_SSID` cookie is the NAS's static X25519 key, base64url.
+2. Run `Noise_IK_25519_ChaChaPoly_BLAKE2b` as initiator with an empty prologue and payload `{"time": <unix seconds>}`. Send message 1 as `ik_message` (base64url, no padding) with `client=browser` on `SYNO.API.Auth` login **v7**. v6 ignores it and returns a limited session. `format=sid` and a custom `session` name work; neither `session=webui` nor `enable_syno_token` is needed.
+3. The login response's `data.ik_message` is message 2. Reading it finishes the handshake.
+4. Every later request carries `X-SYNO-HASH: <first 8 chars of b64url(handshake hash)><b64url(ChaChaPoly tag over empty plaintext and AD with the sending key at nonce n)>.<b64url(decimal n)>`. Without it the session is limited again.
+
+DSM refuses a nonce it has already seen, and one 1024 or more past the highest it has seen (+800 was accepted), with 119 `session hash invalid.`. Lower unused nonces are accepted, and a refusal does not end the session. Because `syno` processes share one cached session, each reserves blocks of 16 nonces through the session file.
+
+A root-owned script task also needs the re-entered-password proof the UI asks for: `SYNO.Core.User.PasswordConfirm auth` v2 with `password` returns `SynoConfirmPWToken`, passed alongside the task on `SYNO.Core.TaskScheduler.Root create` v4 (`name`, `owner:"root"`, `real_owner:"root"`, `enable`, `type:"script"`, `schedule`, `extra:{notify_enable, notify_mail, notify_if_error, script}`). `syno raw --confirm-password` adds the token. `run` and `delete` stay on `SYNO.Core.TaskScheduler` v2 with `tasks:[{id, real_owner}]`. A script task's run-details email (`notify_if_error`) is a single message through the configured SMTP sender, not the push channels.
 
 ## Version negotiation
 

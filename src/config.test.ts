@@ -31,7 +31,7 @@ test("DSM target uses DSM authentication defaults", () => {
     assert.equal(target.user, "agent");
     assert.equal(target.envPrefix, "DSM");
     assert.equal(target.authPath, "entry.cgi");
-    assert.equal(target.authVersion, 6);
+    assert.equal(target.authVersion, 7);
     assert.equal(target.readOnly, false);
   });
 });
