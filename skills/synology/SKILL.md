@@ -24,10 +24,12 @@ Use `syno help --json` for the authoritative command, input, platform, and mutat
 Anything the selected Synology target exposes but `syno` has no named command for is reachable with:
 
 ```
-syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [k=v ...]
+syno raw <api> <method> [--target=dsm|srm] [--version=N] [--post] [--params-json=JSON] [--confirm-password] [k=v ...]
 ```
 
 Prefer `--params-json` so the CLI handles Synology's wire quoting. The trailing `k=v` form sends direct wire values. Do not combine the forms. `--post` and non-read methods need `--yes` unless the exact endpoint is verified as read-only; SRM refuses all mutations even with confirmation.
+
+Add `--confirm-password` to `SYNO.Core.TaskScheduler.Root create` or `set`: DSM requires a re-entered password before saving a root-owned script task, and the flag supplies that token.
 
 Use `--` to stop flag parsing when a DSM param name collides with a CLI flag: `syno raw SYNO.Foo get -- --version=3` sends a literal param rather than setting the API version.
 

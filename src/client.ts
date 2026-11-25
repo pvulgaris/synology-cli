@@ -28,6 +28,13 @@ import {
   writeSession,
   type SessionRecord,
 } from "./session.js";
+import {
+  NoiseInitiator,
+  b64url,
+  fromB64url,
+  requestHash,
+  type NoiseSession,
+} from "./noise.js";
 
 // Bound every GET read (writes/POST are exempt — see callOnce). A target reachable
 // at the TCP layer but unresponsive at the application layer (a wedged SRM web
@@ -37,6 +44,12 @@ import {
 // generous; on timeout fetch rejects (AbortError, not a SynologyApiError) and the caller's
 // catch / runSource surfaces it.
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// DSM accepts each request-hash nonce once, and only up to roughly a thousand
+// past the highest it has seen (measured on DSM 7.4.1: +800 accepted, +1024
+// refused with 119). Processes sharing a cached session therefore reserve small
+// blocks of nonces through the session file rather than picking their own.
+const NONCE_BLOCK = 16;
 
 export interface SynologyApiResponse<T = any> {
   success: boolean;
@@ -149,6 +162,10 @@ export class SynoClient {
   private creds: SynologyCredentials | null = null;
   private sid: string | null = null;
   private sidObtainedAt = 0;
+  private noise: NoiseSession | null = null;
+  private nonce = 0;
+  private nonceEnd = 0;
+  private reserving: Promise<void> | null = null;
   private readonly credLoader: (cfg: TargetConfig) => Promise<SynologyCredentials>;
   private readonly verbose: boolean;
   // Concurrent ensureSession() calls share the in-flight login. Without this,
@@ -166,11 +183,45 @@ export class SynoClient {
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
       const cached = readSession(cachePath);
-      if (cached && this.isUsable(cached)) {
-        this.sid = cached.sid;
-        this.sidObtainedAt = cached.at;
-      }
+      if (cached && this.isUsable(cached)) this.adopt(cached);
     }
+  }
+
+  private adopt(rec: SessionRecord): void {
+    this.sid = rec.sid;
+    this.sidObtainedAt = rec.at;
+    this.noise = rec.noise
+      ? { key: fromB64url(rec.noise.key), handshakeHash: fromB64url(rec.noise.handshakeHash) }
+      : null;
+    this.nonce = this.nonceEnd = 0;
+  }
+
+  private async nextNonce(): Promise<bigint> {
+    // Parallel calls wait on one reservation; each reserving its own block
+    // would let a wide fan-out outrun DSM's window.
+    while (this.nonce >= this.nonceEnd) {
+      this.reserving ??= this.reserveNonces().finally(() => {
+        this.reserving = null;
+      });
+      await this.reserving;
+    }
+    return BigInt(this.nonce++);
+  }
+
+  private async reserveNonces(): Promise<void> {
+    const cachePath = this.cfg.sidCacheFile;
+    let start = this.nonceEnd;
+    if (cachePath) {
+      start = await withSessionLock(cachePath, async () => {
+        const rec = readSession(cachePath);
+        // Another process replaced the session; the next call's 119 re-logs in.
+        if (!rec?.noise || rec.sid !== this.sid) return this.nonceEnd;
+        writeSession(cachePath, { ...rec, noise: { ...rec.noise, nextNonce: rec.noise.nextNonce + NONCE_BLOCK } });
+        return rec.noise.nextNonce;
+      });
+    }
+    this.nonce = start;
+    this.nonceEnd = start + NONCE_BLOCK;
   }
 
   /** A cached record is usable only if it's fresh AND authenticates this exact
@@ -217,8 +268,7 @@ export class SynoClient {
       // adopting it would 119 straight back into this path.
       const cached = readSession(cachePath);
       if (cached && this.isUsable(cached) && cached.sid !== this.rejectedSid) {
-        this.sid = cached.sid;
-        this.sidObtainedAt = cached.at;
+        this.adopt(cached);
         return;
       }
       await awaitFreshTotpWindow(cached?.totpWindow);
@@ -241,15 +291,19 @@ export class SynoClient {
     url.searchParams.set("session", this.cfg.session);
     // NOTE: do NOT request `enable_syno_token=yes` here. It makes DSM issue a
     // token-bound session that then rejects the plain `_sid` GET with code 119
-    // on the very next call (verified against the live NAS). Every tool is a
-    // read, so the CSRF token isn't needed; a future mutating path would fetch
-    // it via a dedicated request rather than poisoning this read session.
+    // on the very next call (verified against the live NAS). The Noise request
+    // hash, not the CSRF token, is what unlocks administrator APIs.
+    const initiator = this.cfg.noiseLogin ? await this.startNoise() : null;
+    if (initiator) {
+      url.searchParams.set("client", "browser");
+      url.searchParams.set("ik_message", b64url(initiator.message1));
+    }
 
     const res = await fetch(url, {
       method: "GET",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    const body = (await res.json()) as SynologyApiResponse<{ sid: string }>;
+    const body = (await res.json()) as SynologyApiResponse<{ sid: string; ik_message?: string }>;
     if (!body.success || !body.data?.sid) {
       const code = body.error?.code ?? -1;
       // Surface the full auth error payload (matches callOnce's data-call logging);
@@ -266,9 +320,21 @@ export class SynoClient {
         `${this.cfg.platform.toUpperCase()} login failed (code ${code}). Confirm the user exists, has 2FA on, and that the password and TOTP seed are correct.`
       );
     }
+    // Finish the handshake before adopting the SID, so a malformed reply can't
+    // leave this client holding a new SID with the previous session's key.
+    const noise =
+      initiator && body.data.ik_message ? initiator.finish(fromB64url(body.data.ik_message)) : null;
+    if (this.cfg.noiseLogin && !noise) {
+      console.error(
+        `[syno:${this.cfg.platform}] DSM did not complete the Noise login; administrator APIs will return 105.`
+      );
+    }
     this.sid = body.data.sid;
     this.sidObtainedAt = Date.now();
     this.rejectedSid = null;
+    this.noise = noise;
+    this.nonce = 0;
+    this.nonceEnd = NONCE_BLOCK;
     const cachePath = this.cfg.sidCacheFile;
     if (cachePath) {
       writeSession(cachePath, {
@@ -277,8 +343,47 @@ export class SynoClient {
         totpWindow,
         baseUrl: this.cfg.baseUrl,
         user: this.cfg.user,
+        noise: this.noise
+          ? {
+              key: b64url(this.noise.key),
+              handshakeHash: b64url(this.noise.handshakeHash),
+              nextNonce: NONCE_BLOCK,
+            }
+          : undefined,
       });
     }
+  }
+
+  /** Begin the web UI's Noise handshake against the NAS's static key, which DSM
+   *  hands out as the `_SSID` cookie. Null when DSM offers none. */
+  private async startNoise(): Promise<NoiseInitiator | null> {
+    const res = await fetch(`${this.cfg.baseUrl}/webapi/entry.cgi/SYNO.API.Auth.UIConfig`, {
+      method: "POST",
+      body: new URLSearchParams({ api: "SYNO.API.Auth.UIConfig", method: "get", version: "1" }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const ssid = res.headers
+      .getSetCookie()
+      .map((c) => /^_SSID=([^;]+)/.exec(c)?.[1])
+      .find(Boolean);
+    if (!ssid) return null;
+    const payload = JSON.stringify({ time: Math.floor(Date.now() / 1000) });
+    return new NoiseInitiator(fromB64url(ssid), Buffer.from(payload));
+  }
+
+  /** A SynoConfirmPWToken: DSM's re-entered-password proof, which it requires
+   *  before saving a root-owned script task. */
+  async passwordConfirmToken(): Promise<string> {
+    if (!this.creds) this.creds = await this.credLoader(this.cfg);
+    const data = await this.call<{ SynoConfirmPWToken: string }>({
+      api: "SYNO.Core.User.PasswordConfirm",
+      method: "auth",
+      version: 2,
+      post: true,
+      params: { password: JSON.stringify(this.creds.password) },
+      sensitiveResponse: true,
+    });
+    return data.SynoConfirmPWToken;
   }
 
   /**
@@ -350,6 +455,9 @@ export class SynoClient {
 
     const headers: Record<string, string> = {};
     if (opts.post) headers["Content-Type"] = "application/x-www-form-urlencoded";
+    if (this.noise) {
+      headers["X-SYNO-HASH"] = requestHash(this.noise, await this.nextNonce());
+    }
     // Bound only GET reads: the 30s cap exists to stop one hung target from wedging
     // the digest's parallel read fan-out. State-changing POSTs are exempt — they keep
     // undici's default so a slow-but-successful commit that drops the TCP connection

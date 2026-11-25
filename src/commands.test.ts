@@ -213,6 +213,12 @@ test("gate: raw mutating methods require confirmation even when DSM uses GET", (
   assert.equal(methodMayMutate("unknown_future_method"), true);
 });
 
+test("gate: raw --confirm-password requires confirmation even on a read", () => {
+  // The flag sends the account password to DSM whatever the target method is.
+  const raw = byName("raw");
+  assert.equal(requiresConfirmation(raw, { "confirm-password": true }, ["SYNO.Core.System", "info"]), true);
+});
+
 test("gate: every command that can mutate DSM is either mutating or raw", () => {
   // Encodes the rule the registry must keep: a command reaching a DSM write has
   // to be declared mutating. `raw` is the sanctioned exception, gated by POST

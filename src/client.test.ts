@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { SynologyApiError, SynoClient, errorMessage, isSoftTransportError } from "./client.js";
+import { b64url, fromB64url } from "./noise.js";
+import { writeSession } from "./session.js";
 
 function sessionClient(verbose = false): SynoClient {
   const client = new SynoClient(
@@ -160,4 +165,49 @@ test("errorMessage: a failed fetch names its network cause", () => {
     ),
   });
   assert.equal(errorMessage(both), "fetch failed: connect ECONNREFUSED ::1:5001; connect ECONNREFUSED 127.0.0.1:5001");
+});
+
+test("clients sharing a cached session never reuse or outrun request nonces", async () => {
+  // DSM refuses a repeated nonce and one about a thousand past the highest seen.
+  const dir = mkdtempSync(join(tmpdir(), "syno-nonce-"));
+  const cfg = {
+    platform: "dsm" as const,
+    baseUrl: "https://example.test",
+    user: "agent",
+    envPrefix: "DSM" as const,
+    session: "test",
+    authVersion: 7,
+    authPath: "entry.cgi",
+    sidCacheFile: join(dir, "session.json"),
+    readOnly: false,
+    noiseLogin: true,
+    tlsSkipVerify: false,
+  };
+  writeSession(cfg.sidCacheFile, {
+    sid: "test-sid",
+    at: Date.now(),
+    baseUrl: cfg.baseUrl,
+    user: cfg.user,
+    noise: { key: b64url(Buffer.alloc(32, 7)), handshakeHash: b64url(Buffer.alloc(64, 9)), nextNonce: 0 },
+  });
+  const nonces: number[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    const hash = (init?.headers as Record<string, string>)["X-SYNO-HASH"];
+    nonces.push(Number(fromB64url(hash.split(".")[1]).toString()));
+    return { json: async () => ({ success: true, data: {} }) };
+  }) as typeof fetch;
+
+  try {
+    const clients = [new SynoClient(cfg), new SynoClient(cfg)];
+    await Promise.all(
+      Array.from({ length: 40 }, (_, i) => clients[i % 2].call({ api: "SYNO.Foo", method: "get" }))
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  assert.equal(new Set(nonces).size, 40);
+  assert.ok(Math.max(...nonces) < 100, `nonces ran ahead: ${Math.max(...nonces)}`);
 });
